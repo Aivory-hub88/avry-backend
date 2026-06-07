@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  avry_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: avry-backend
+    ports:
+      - "8081:8081"
+    environment:
+      # Database
+      DATABASE_URL: ${DATABASE_URL}
+      
+      # Service
+      PORT: 8081
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      
+      # JWT
+      JWT_SECRET: ${JWT_SECRET}
+      
+      # API Keys (as needed)
+      # API_KEY: ${API_KEY}
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
