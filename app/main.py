@@ -21,6 +21,13 @@ from app.config import settings
 from app.database.db_service import DatabaseService
 from app.llm.ollama_client import OllamaClient
 
+# PostgreSQL pool for auth
+try:
+    from app.database import pg_service as pg
+    _PG_MODULE = True
+except ImportError:
+    _PG_MODULE = False
+
 # Register routes
 try:
     from app.routes.auth import router as auth_router
@@ -51,8 +58,11 @@ except Exception as e:
 async def lifespan(app: FastAPI):
     """Lifespan events - startup and shutdown"""
     print(f"[{datetime.now().isoformat()}] [STARTUP] AVRY-Backend service starting on port 8081...")
-    print("[***] BACKEND MAIN.PY IS RUNNING - TEST PRINT [***]")
-    
+
+    # Init PostgreSQL pool for auth
+    if _PG_MODULE:
+        await pg.init_pool()
+
     # Start event consumer (Phase 2)
     consumer_thread = None
     if start_consumer_background:
@@ -61,16 +71,18 @@ async def lifespan(app: FastAPI):
             print("[✓] Event consumer started in background")
         except Exception as e:
             print(f"[!] Warning: Could not start event consumer: {e}")
-    
+
     yield
-    
+
     print(f"[{datetime.now().isoformat()}] [SHUTDOWN] AVRY-Backend service shutting down...")
-    
-    # Stop event consumer gracefully
+
+    # Close PostgreSQL pool
+    if _PG_MODULE:
+        await pg.close_pool()
+
     if consumer_thread:
         try:
             print("[*] Stopping event consumer...")
-            # Consumer will stop when main thread exits (daemon=True)
         except Exception as e:
             print(f"[!] Warning stopping consumer: {e}")
 
@@ -153,13 +165,14 @@ if auth_router:
 @app.get("/health")
 async def health():
     """Health check endpoint"""
+    pg_status = "connected" if (_PG_MODULE and await pg.is_available()) else "file-only"
     return {
         "status": "healthy",
         "service": "avry-backend",
         "version": "1.0.0",
         "port": 8081,
         "timestamp": datetime.utcnow().isoformat(),
-        "database": "connected",
+        "database": pg_status,
         "llm": "available" if llm_client else "unavailable"
     }
 
@@ -199,13 +212,6 @@ async def get_models_schemas():
         "database_type": "file-based",
         "collections": ["users", "diagnostics", "snapshots", "tiers", "wallets"]
     }
-
-# ===== SIMPLE TEST ROUTES =====
-@app.post("/api/v1/auth/login")
-async def login_simple(email: str = None, password: str = None):
-    """Simple login endpoint - TESTING ONLY"""
-    print(f"[LOGIN CALLED] email={email}")
-    return {"success": True, "access_token": "test_token", "user": {"email": email}}
 
 # ===== STARTUP DEBUG =====
 @app.get("/api/debug/info")
