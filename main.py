@@ -65,6 +65,13 @@ try:
 except Exception as e:
     print(f"[!] Templates/Agents routes failed: {e}")
 
+try:
+    from app.routes.agent_catalog import router as agent_catalog_router
+    app.include_router(agent_catalog_router)
+    print("[OK] Agent catalog routes registered")
+except Exception as e:
+    print(f"[!] Agent catalog routes failed: {e}")
+
 
 @app.get("/health")
 async def health():

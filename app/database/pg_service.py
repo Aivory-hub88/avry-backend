@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS templates (
 );
 CREATE INDEX IF NOT EXISTS idx_templates_status ON templates(status);
 CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category);
+CREATE TABLE IF NOT EXISTS agent_catalog (
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    description   TEXT,
+    category      TEXT DEFAULT 'general',
+    icon          TEXT,
+    tags          TEXT[] DEFAULT '{}',
+    status        TEXT DEFAULT 'draft',
+    config        JSONB DEFAULT '{}'::jsonb,
+    created_by    TEXT,
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    updated_at    TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_catalog_status ON agent_catalog(status);
 
 CREATE TABLE IF NOT EXISTS agents (
     agent_id     TEXT PRIMARY KEY,
@@ -399,3 +413,67 @@ async def upsert_agent(data: dict) -> dict:
         float(data.get("success_rate", 0) or 0), data.get("last_run_at"),
     )
     return dict(row)
+
+
+def _row_to_agent_catalog(row) -> dict:
+    d = dict(row)
+    cfg = d.get("config")
+    if isinstance(cfg, str):
+        try:
+            d["config"] = _json.loads(cfg)
+        except Exception:
+            d["config"] = {}
+    return d
+
+
+async def list_agent_catalog(status: Optional[str] = None) -> list:
+    pool = await get_pool()
+    if status:
+        rows = await pool.fetch("SELECT * FROM agent_catalog WHERE status=$1 ORDER BY created_at DESC", status)
+    else:
+        rows = await pool.fetch("SELECT * FROM agent_catalog ORDER BY created_at DESC")
+    return [_row_to_agent_catalog(r) for r in rows]
+
+
+async def get_agent_catalog(aid: str) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM agent_catalog WHERE id=$1", aid)
+    return _row_to_agent_catalog(row) if row else None
+
+
+async def insert_agent_catalog(data: dict) -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO agent_catalog
+           (id,name,description,category,icon,tags,status,config,created_by)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING *""",
+        data["id"], data["name"], data.get("description"), data.get("category", "general"),
+        data.get("icon"), list(data.get("tags") or []), data.get("status", "draft"),
+        _json.dumps(data.get("config") or {}), data.get("created_by"),
+    )
+    return _row_to_agent_catalog(row)
+
+
+async def update_agent_catalog(aid: str, data: dict) -> Optional[dict]:
+    pool = await get_pool()
+    cfg = data.get("config")
+    row = await pool.fetchrow(
+        """UPDATE agent_catalog SET
+             name=COALESCE($2,name), description=COALESCE($3,description),
+             category=COALESCE($4,category), icon=COALESCE($5,icon),
+             tags=COALESCE($6,tags), status=COALESCE($7,status),
+             config=COALESCE($8::jsonb,config), updated_at=now()
+           WHERE id=$1 RETURNING *""",
+        aid, data.get("name"), data.get("description"), data.get("category"),
+        data.get("icon"),
+        list(data["tags"]) if data.get("tags") is not None else None,
+        data.get("status"),
+        _json.dumps(cfg) if cfg is not None else None,
+    )
+    return _row_to_agent_catalog(row) if row else None
+
+
+async def delete_agent_catalog(aid: str) -> bool:
+    pool = await get_pool()
+    res = await pool.execute("DELETE FROM agent_catalog WHERE id=$1", aid)
+    return res.endswith("1")
