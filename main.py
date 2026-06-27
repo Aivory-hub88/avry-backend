@@ -72,6 +72,35 @@ try:
 except Exception as e:
     print(f"[!] Agent catalog routes failed: {e}")
 
+try:
+    from app.routes.impersonation import router as impersonation_router
+    app.include_router(impersonation_router)
+    print("[OK] Impersonation routes registered")
+except Exception as e:
+    print(f"[!] Impersonation routes failed: {e}")
+
+try:
+    from app.routes.logs import router as logs_router
+    app.include_router(logs_router)
+    print("[OK] Logs routes registered")
+except Exception as e:
+    print(f"[!] Logs routes failed: {e}")
+
+try:
+    from app.routes.admin_users import router as admin_users_router
+    app.include_router(admin_users_router)
+    print("[OK] Admin users routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import admin users routes: {e}")
+
+# Impersonation middleware
+try:
+    from app.middleware.impersonation_middleware import ImpersonationMiddleware
+    app.add_middleware(ImpersonationMiddleware)
+    print("[OK] Impersonation middleware registered")
+except Exception as e:
+    print(f"[!] Impersonation middleware failed: {e}")
+
 
 @app.get("/health")
 async def health():

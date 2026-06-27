@@ -36,6 +36,27 @@ except Exception as e:
     print(f"[!] Warning: Could not import auth routes: {e}")
     auth_router = None
 
+try:
+    from app.routes.impersonation import router as impersonation_router
+    print("[✓] Impersonation routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import impersonation routes: {e}")
+    impersonation_router = None
+
+try:
+    from app.routes.logs import router as logs_router
+    print("[✓] Logs routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import logs routes: {e}")
+    logs_router = None
+
+try:
+    from app.routes.admin_users import router as admin_users_router
+    print("[✓] Admin users routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import admin users routes: {e}")
+    admin_users_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -102,6 +123,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Impersonation middleware — detects and validates impersonation tokens on every request
+try:
+    from app.middleware.impersonation_middleware import ImpersonationMiddleware
+    app.add_middleware(ImpersonationMiddleware)
+    print("[✓] Impersonation middleware registered")
+except Exception as e:
+    print(f"[!] Warning: Could not register impersonation middleware: {e}")
+
 # ===== HELPER FUNCTIONS =====
 def generate_id(prefix: str = "") -> str:
     """Generate ID locally"""
@@ -160,6 +189,15 @@ async def get_tier_state(user_id: str):
 # Register routes (AFTER tier endpoints)
 if auth_router:
     app.include_router(auth_router)
+
+if impersonation_router:
+    app.include_router(impersonation_router)
+
+if logs_router:
+    app.include_router(logs_router)
+
+if admin_users_router:
+    app.include_router(admin_users_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")

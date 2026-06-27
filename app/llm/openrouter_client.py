@@ -1,6 +1,7 @@
-"""OpenRouter AI client for Aivory"""
+"""OpenRouter AI client for Aivory — with key rotation support (requests-based)"""
+import os
 import logging
-import httpx
+import requests
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 
@@ -18,18 +19,60 @@ class OpenRouterRateLimitError(Exception):
     pass
 
 
+def _load_api_keys() -> List[str]:
+    """
+    Load OpenRouter API keys from environment.
+    Supports rotation via OPENROUTER_API_KEY, OPENROUTER_API_KEY_2, OPENROUTER_API_KEY_3.
+    """
+    keys = []
+    primary = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if primary:
+        keys.append(primary)
+    key2 = os.getenv("OPENROUTER_API_KEY_2", "").strip()
+    if key2:
+        keys.append(key2)
+    key3 = os.getenv("OPENROUTER_API_KEY_3", "").strip()
+    if key3:
+        keys.append(key3)
+    return keys
+
+
 class OpenRouterClient:
-    """Client for OpenRouter API"""
-    
+    """Client for OpenRouter API with round-robin key rotation."""
+
     def __init__(self, api_key: str = None, base_url: str = "https://openrouter.ai/api/v1"):
         self.base_url = base_url
-        self.api_key = api_key
-        
-        if not self.api_key or not self.api_key.strip():
+
+        # Build key pool: explicit key param > env vars
+        if api_key and api_key.strip():
+            self._keys = [api_key.strip()]
+        else:
+            self._keys = _load_api_keys()
+
+        self._key_index = 0
+
+        if not self._keys:
             logger.warning("OPENROUTER_API_KEY not configured - AI features will be unavailable")
         else:
-            logger.info("OpenRouter API: Configured")
-    
+            count = len(self._keys)
+            status = "enabled" if count > 1 else "disabled"
+            logger.info(f"OpenRouter API: Configured with {count} key(s) (rotation {status})")
+
+    @property
+    def api_key(self) -> Optional[str]:
+        """Current active key."""
+        if not self._keys:
+            return None
+        return self._keys[self._key_index % len(self._keys)]
+
+    def _rotate_key(self) -> Optional[str]:
+        """Advance to next key in the pool."""
+        if len(self._keys) <= 1:
+            return None
+        self._key_index = (self._key_index + 1) % len(self._keys)
+        logger.info(f"OpenRouter: Rotated to key #{self._key_index + 1}/{len(self._keys)}")
+        return self._keys[self._key_index]
+
     async def chat_completion(
         self,
         messages: List[OpenRouterMessage],
@@ -39,103 +82,93 @@ class OpenRouterClient:
         timeout: float = 60.0
     ) -> str:
         """
-        Call OpenRouter chat completion API.
-        
-        Args:
-            messages: List of messages (system + user + assistant)
-            model: Model name (e.g., "deepseek/deepseek-chat", "google/gemini-2.0-flash-exp:free")
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            timeout: Request timeout in seconds
-        
-        Returns:
-            Generated text content
-        
-        Raises:
-            ConnectionError: If API is unreachable
-            ValueError: If API returns error
+        Call OpenRouter chat completion API with automatic key rotation on rate limit.
+        Uses requests (sync) internally — safe for FastAPI with small payloads.
         """
-        if not self.api_key:
+        if not self._keys:
             raise ConnectionError("OpenRouter API key not configured")
-        
+
         url = f"{self.base_url}/chat/completions"
-        
+
         payload = {
             "model": model,
             "messages": [msg.dict() for msg in messages],
             "temperature": temperature,
             "max_tokens": max_tokens
         }
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-            "HTTP-Referer": "https://aivory.ai",  # Optional: for rankings
-            "X-Title": "Aivory AI Platform"  # Optional: for rankings
-        }
-        
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                logger.info(f"Calling OpenRouter API with model: {model}")
-                response = await client.post(url, json=payload, headers=headers)
-                
-                if not response.is_success:
-                    error_text = response.text
-                    logger.error(f"OpenRouter API error: {error_text}")
-                    
-                    # Check if it's a rate limit error (429)
-                    if response.status_code == 429 or "rate-limited" in error_text.lower() or "rate limit" in error_text.lower():
-                        raise OpenRouterRateLimitError(f"Rate limit exceeded: {error_text}")
-                    
-                    raise ValueError(f"OpenRouter API error: {error_text}")
-                
-                data = response.json()
-                content = data["choices"][0]["message"]["content"]
-                
-                # Log usage if available
-                if "usage" in data:
-                    usage = data["usage"]
-                    logger.info(f"OpenRouter usage - tokens: {usage.get('total_tokens', 0)}")
-                
-                logger.info("OpenRouter API call successful")
-                return content
-                
-        except httpx.TimeoutException as e:
-            logger.error(f"OpenRouter API timeout: {e}")
-            raise ConnectionError(f"OpenRouter API timeout: {e}")
-        except httpx.RequestError as e:
-            logger.error(f"OpenRouter API connection error: {e}")
-            raise ConnectionError(f"OpenRouter API connection error: {e}")
-        except KeyError as e:
-            logger.error(f"Unexpected OpenRouter API response format: {e}")
-            raise ValueError(f"Unexpected API response format: {e}")
-    
+
+        attempts = len(self._keys)
+        last_error = None
+
+        for attempt in range(attempts):
+            current_key = self.api_key
+            key_label = f"key #{(self._key_index % len(self._keys)) + 1}"
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {current_key}",
+                "HTTP-Referer": "https://aivory.ai",
+                "X-Title": "Aivory AI Platform"
+            }
+
+            try:
+                logger.info(f"Calling OpenRouter API with model: {model} ({key_label})")
+                response = requests.post(url, json=payload, headers=headers, timeout=timeout)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"]
+
+                    if "usage" in data:
+                        usage = data["usage"]
+                        logger.info(f"OpenRouter usage - tokens: {usage.get('total_tokens', 0)}")
+
+                    logger.info(f"OpenRouter API call successful ({key_label})")
+                    return content
+
+                error_text = response.text
+                logger.error(f"OpenRouter API error ({key_label}): {response.status_code} - {error_text[:200]}")
+
+                # Rate limit — try next key
+                if response.status_code == 429 or "rate-limited" in error_text.lower() or "rate limit" in error_text.lower():
+                    last_error = OpenRouterRateLimitError(f"Rate limit on {key_label}")
+                    logger.warning(f"Rate limit hit on {key_label}, rotating...")
+                    if self._rotate_key() is None:
+                        raise last_error
+                    continue
+
+                # Other API error — don't rotate
+                raise ValueError(f"OpenRouter API error: {error_text[:300]}")
+
+            except requests.Timeout as e:
+                logger.error(f"OpenRouter API timeout: {e}")
+                raise ConnectionError(f"OpenRouter API timeout: {e}")
+            except requests.RequestException as e:
+                logger.error(f"OpenRouter API connection error: {e}")
+                raise ConnectionError(f"OpenRouter API connection error: {e}")
+            except (OpenRouterRateLimitError, ValueError, ConnectionError):
+                raise
+            except KeyError as e:
+                logger.error(f"Unexpected OpenRouter API response format: {e}")
+                raise ValueError(f"Unexpected API response format: {e}")
+
+        # All keys exhausted
+        raise last_error or OpenRouterRateLimitError("All API keys rate-limited")
+
     async def get_models(self) -> List[Dict]:
-        """
-        Get list of available models from OpenRouter.
-        
-        Returns:
-            List of model dictionaries
-        """
-        if not self.api_key:
+        """Get list of available models from OpenRouter."""
+        if not self._keys:
             raise ConnectionError("OpenRouter API key not configured")
-        
+
         url = f"{self.base_url}/models"
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(url, headers=headers)
-                
-                if not response.is_success:
-                    raise ValueError(f"Failed to fetch models: {response.text}")
-                
-                data = response.json()
-                return data.get("data", [])
-                
+            response = requests.get(url, headers=headers, timeout=30.0)
+            if response.status_code != 200:
+                raise ValueError(f"Failed to fetch models: {response.text}")
+            data = response.json()
+            return data.get("data", [])
         except Exception as e:
             logger.error(f"Error fetching models: {e}")
             raise
