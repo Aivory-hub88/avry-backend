@@ -128,58 +128,56 @@ END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_refresh ON sessions (refresh_token) WHERE refresh_token IS NOT NULL;
 
--- ── Templates & Agents (shared with user/admin dashboards) ─────────────
-CREATE TABLE IF NOT EXISTS templates (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    description   TEXT,
-    category      TEXT DEFAULT 'general',
-    tags          TEXT[] DEFAULT '{}',
-    apps          TEXT[] DEFAULT '{}',
-    status        TEXT DEFAULT 'draft',
-    uses_count    INTEGER DEFAULT 0,
-    workflow_json JSONB DEFAULT '{}'::jsonb,
-    created_by    TEXT,
-    created_at    TIMESTAMPTZ DEFAULT now(),
-    updated_at    TIMESTAMPTZ DEFAULT now()
+-- Audit logs table (for impersonation and general audit events)
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT REFERENCES users(id),
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    changes JSONB,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_templates_status ON templates(status);
-CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category);
-CREATE TABLE IF NOT EXISTS agent_catalog (
-    id            TEXT PRIMARY KEY,
-    name          TEXT NOT NULL,
-    description   TEXT,
-    category      TEXT DEFAULT 'general',
-    icon          TEXT,
-    tags          TEXT[] DEFAULT '{}',
-    status        TEXT DEFAULT 'draft',
-    config        JSONB DEFAULT '{}'::jsonb,
-    created_by    TEXT,
-    created_at    TIMESTAMPTZ DEFAULT now(),
-    updated_at    TIMESTAMPTZ DEFAULT now()
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+
+-- Impersonation sessions table
+CREATE TABLE IF NOT EXISTS impersonation_sessions (
+    id TEXT PRIMARY KEY,
+    admin_user_id TEXT NOT NULL REFERENCES users(id),
+    target_user_id TEXT NOT NULL REFERENCES users(id),
+    access_mode VARCHAR(20) NOT NULL DEFAULT 'read_only',
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    ended_at TIMESTAMPTZ,
+    termination_reason VARCHAR(50),
+    total_requests INTEGER NOT NULL DEFAULT 0,
+    mutations_attempted INTEGER NOT NULL DEFAULT 0,
+    mutations_blocked INTEGER NOT NULL DEFAULT 0,
+    pages_visited JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_agent_catalog_status ON agent_catalog(status);
 
-CREATE TABLE IF NOT EXISTS agents (
-    agent_id     TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL,
-    name         TEXT NOT NULL,
-    type         TEXT,
-    status       TEXT DEFAULT 'inactive',
-    total_runs   INTEGER DEFAULT 0,
-    success_rate NUMERIC DEFAULT 0,
-    last_run_at  TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_agents_user_id ON agents(user_id);
+CREATE INDEX IF NOT EXISTS idx_imp_sessions_admin ON impersonation_sessions(admin_user_id);
+CREATE INDEX IF NOT EXISTS idx_imp_sessions_status ON impersonation_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_imp_sessions_started ON impersonation_sessions(started_at);
 
-INSERT INTO templates (id, name, description, category, tags, apps, status, uses_count) VALUES
-  ('tpl-wa-autoreply', 'Simple WhatsApp Auto Reply (AI)', 'Automatically respond to incoming WhatsApp messages using Aivory AI.', 'Communication', ARRAY['whatsapp','ai'], ARRAY['whatsapp'], 'active', 841),
-  ('tpl-support-escalation', 'Customer Support Escalation', 'Extract sentiment from support tickets and escalate angry customers to a human agent.', 'Customer', ARRAY['support','sentiment'], ARRAY['zendesk','slack'], 'active', 575),
-  ('tpl-lead-scoring', 'Lead Scoring Pipeline', 'Score and route inbound leads automatically.', 'sales', ARRAY['leads','scoring'], ARRAY['hubspot'], 'active', 0),
-  ('tpl-email-campaign', 'Email Campaign Automation', 'Automated email drip sequences.', 'marketing', ARRAY['email','drip'], ARRAY['gmail'], 'active', 0)
-ON CONFLICT (id) DO NOTHING;
-
+-- Add impersonation_permission to users table
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='impersonation_permission'
+    ) THEN
+        ALTER TABLE users ADD COLUMN impersonation_permission BOOLEAN DEFAULT false;
+    END IF;
+END $$;
 """
 
 
@@ -197,7 +195,8 @@ async def get_user_by_email(email: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, email, password_hash, account_type, company_name, "
-        "is_active, created_at, updated_at FROM users WHERE email = $1",
+        "is_active, impersonation_permission, created_at, updated_at "
+        "FROM users WHERE email = $1",
         email,
     )
     return dict(row) if row else None
@@ -207,7 +206,8 @@ async def get_user_by_id(user_id: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, email, password_hash, account_type, company_name, "
-        "is_active, created_at, updated_at FROM users WHERE id = $1",
+        "is_active, impersonation_permission, created_at, updated_at "
+        "FROM users WHERE id = $1",
         user_id,
     )
     return dict(row) if row else None
@@ -301,179 +301,3 @@ async def get_user_from_refresh_token(refresh_token: str) -> Optional[dict]:
         refresh_token,
     )
     return dict(row) if row else None
-
-
-# ===========================================================================
-# Templates & Agents (shared with user/admin dashboards)
-# ===========================================================================
-import json as _json
-
-
-def _row_to_template(row) -> dict:
-    d = dict(row)
-    wf = d.get("workflow_json")
-    if isinstance(wf, str):
-        try:
-            d["workflow_json"] = _json.loads(wf)
-        except Exception:
-            d["workflow_json"] = {}
-    return d
-
-
-async def list_templates(status: Optional[str] = None) -> list:
-    pool = await get_pool()
-    if status:
-        rows = await pool.fetch("SELECT * FROM templates WHERE status=$1 ORDER BY created_at DESC", status)
-    else:
-        rows = await pool.fetch("SELECT * FROM templates ORDER BY created_at DESC")
-    return [_row_to_template(r) for r in rows]
-
-
-async def get_template(tid: str) -> Optional[dict]:
-    pool = await get_pool()
-    row = await pool.fetchrow("SELECT * FROM templates WHERE id=$1", tid)
-    return _row_to_template(row) if row else None
-
-
-async def insert_template(data: dict) -> dict:
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        """INSERT INTO templates
-           (id,name,description,category,tags,apps,status,uses_count,workflow_json,created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10) RETURNING *""",
-        data["id"], data["name"], data.get("description"), data.get("category", "general"),
-        list(data.get("tags") or []), list(data.get("apps") or []),
-        data.get("status", "draft"), int(data.get("uses_count", 0) or 0),
-        _json.dumps(data.get("workflow_json") or {}), data.get("created_by"),
-    )
-    return _row_to_template(row)
-
-
-async def update_template(tid: str, data: dict) -> Optional[dict]:
-    pool = await get_pool()
-    wf = data.get("workflow_json")
-    row = await pool.fetchrow(
-        """UPDATE templates SET
-             name=COALESCE($2,name), description=COALESCE($3,description),
-             category=COALESCE($4,category), tags=COALESCE($5,tags), apps=COALESCE($6,apps),
-             status=COALESCE($7,status),
-             workflow_json=COALESCE($8::jsonb,workflow_json),
-             updated_at=now()
-           WHERE id=$1 RETURNING *""",
-        tid, data.get("name"), data.get("description"), data.get("category"),
-        list(data["tags"]) if data.get("tags") is not None else None,
-        list(data["apps"]) if data.get("apps") is not None else None,
-        data.get("status"),
-        _json.dumps(wf) if wf is not None else None,
-    )
-    return _row_to_template(row) if row else None
-
-
-async def delete_template(tid: str) -> bool:
-    pool = await get_pool()
-    res = await pool.execute("DELETE FROM templates WHERE id=$1", tid)
-    return res.split()[-1] != "0"
-
-
-async def increment_template_uses(tid: str) -> Optional[dict]:
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        "UPDATE templates SET uses_count=uses_count+1 WHERE id=$1 RETURNING *", tid)
-    return _row_to_template(row) if row else None
-
-
-async def list_agents(user_id: Optional[str] = None) -> list:
-    pool = await get_pool()
-    if user_id:
-        rows = await pool.fetch("SELECT * FROM agents WHERE user_id=$1 ORDER BY created_at DESC", user_id)
-    else:
-        rows = await pool.fetch("SELECT * FROM agents ORDER BY created_at DESC")
-    return [dict(r) for r in rows]
-
-
-async def get_agent(aid: str) -> Optional[dict]:
-    pool = await get_pool()
-    row = await pool.fetchrow("SELECT * FROM agents WHERE agent_id=$1", aid)
-    return dict(row) if row else None
-
-
-async def upsert_agent(data: dict) -> dict:
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        """INSERT INTO agents
-           (agent_id,user_id,name,type,status,total_runs,success_rate,last_run_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-           ON CONFLICT (agent_id) DO UPDATE SET
-             name=EXCLUDED.name, type=EXCLUDED.type, status=EXCLUDED.status,
-             total_runs=EXCLUDED.total_runs, success_rate=EXCLUDED.success_rate,
-             last_run_at=EXCLUDED.last_run_at
-           RETURNING *""",
-        data["agent_id"], data["user_id"], data["name"], data.get("type"),
-        data.get("status", "inactive"), int(data.get("total_runs", 0) or 0),
-        float(data.get("success_rate", 0) or 0), data.get("last_run_at"),
-    )
-    return dict(row)
-
-
-def _row_to_agent_catalog(row) -> dict:
-    d = dict(row)
-    cfg = d.get("config")
-    if isinstance(cfg, str):
-        try:
-            d["config"] = _json.loads(cfg)
-        except Exception:
-            d["config"] = {}
-    return d
-
-
-async def list_agent_catalog(status: Optional[str] = None) -> list:
-    pool = await get_pool()
-    if status:
-        rows = await pool.fetch("SELECT * FROM agent_catalog WHERE status=$1 ORDER BY created_at DESC", status)
-    else:
-        rows = await pool.fetch("SELECT * FROM agent_catalog ORDER BY created_at DESC")
-    return [_row_to_agent_catalog(r) for r in rows]
-
-
-async def get_agent_catalog(aid: str) -> Optional[dict]:
-    pool = await get_pool()
-    row = await pool.fetchrow("SELECT * FROM agent_catalog WHERE id=$1", aid)
-    return _row_to_agent_catalog(row) if row else None
-
-
-async def insert_agent_catalog(data: dict) -> dict:
-    pool = await get_pool()
-    row = await pool.fetchrow(
-        """INSERT INTO agent_catalog
-           (id,name,description,category,icon,tags,status,config,created_by)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9) RETURNING *""",
-        data["id"], data["name"], data.get("description"), data.get("category", "general"),
-        data.get("icon"), list(data.get("tags") or []), data.get("status", "draft"),
-        _json.dumps(data.get("config") or {}), data.get("created_by"),
-    )
-    return _row_to_agent_catalog(row)
-
-
-async def update_agent_catalog(aid: str, data: dict) -> Optional[dict]:
-    pool = await get_pool()
-    cfg = data.get("config")
-    row = await pool.fetchrow(
-        """UPDATE agent_catalog SET
-             name=COALESCE($2,name), description=COALESCE($3,description),
-             category=COALESCE($4,category), icon=COALESCE($5,icon),
-             tags=COALESCE($6,tags), status=COALESCE($7,status),
-             config=COALESCE($8::jsonb,config), updated_at=now()
-           WHERE id=$1 RETURNING *""",
-        aid, data.get("name"), data.get("description"), data.get("category"),
-        data.get("icon"),
-        list(data["tags"]) if data.get("tags") is not None else None,
-        data.get("status"),
-        _json.dumps(cfg) if cfg is not None else None,
-    )
-    return _row_to_agent_catalog(row) if row else None
-
-
-async def delete_agent_catalog(aid: str) -> bool:
-    pool = await get_pool()
-    res = await pool.execute("DELETE FROM agent_catalog WHERE id=$1", aid)
-    return res.endswith("1")
