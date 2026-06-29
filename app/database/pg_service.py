@@ -194,7 +194,7 @@ async def _run_migrations() -> None:
 async def get_user_by_email(email: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, email, password_hash, account_type, company_name, "
+        "SELECT id, email, password_hash, account_type, company_name, full_name, username, "
         "is_active, impersonation_permission, created_at, updated_at "
         "FROM users WHERE email = $1",
         email,
@@ -205,7 +205,7 @@ async def get_user_by_email(email: str) -> Optional[dict]:
 async def get_user_by_id(user_id: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id, email, password_hash, account_type, company_name, "
+        "SELECT id, email, password_hash, account_type, company_name, full_name, username, "
         "is_active, impersonation_permission, created_at, updated_at "
         "FROM users WHERE id = $1",
         user_id,
