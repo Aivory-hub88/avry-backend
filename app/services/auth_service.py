@@ -55,6 +55,8 @@ class AuthService:
             "user_id":      user.get("user_id") or user.get("id"),
             "email":        user["email"],
             "account_type": user.get("account_type", "free"),
+            "full_name":    user.get("full_name"),
+            "username":     user.get("username"),
             "exp": _now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
             "iat": _now(),
         }
