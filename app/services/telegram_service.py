@@ -324,9 +324,14 @@ class TelegramService:
         """Forward a bound chat message to the agent gateway, if configured."""
         if not settings.telegram_agent_gateway_url:
             return FALLBACK_REPLY
+        headers = {}
+        gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
+        if gateway_token:
+            headers["X-Internal-Token"] = gateway_token
         try:
             resp = requests.post(
                 f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/message",
+                headers=headers,
                 json={
                     "user_id": binding["user_id"],
                     "agent_type": binding["agent_type"],
