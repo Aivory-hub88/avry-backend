@@ -14,11 +14,25 @@ WEBHOOK_URL="${1:-https://backend.aivory.id/api/v1/telegram/webhook}"
 : "${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}"
 : "${TELEGRAM_WEBHOOK_SECRET:?TELEGRAM_WEBHOOK_SECRET is required}"
 
-curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+API="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+
+curl -sS "${API}/setWebhook" \
   -d "url=${WEBHOOK_URL}" \
   -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
   -d 'allowed_updates=["message"]' \
   -d "drop_pending_updates=true"
 echo
-curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+
+# Prompt-only UX: clear the command menu entirely (no visible commands)
+# and brand the pre-Start profile screen like an AI product.
+curl -sS "${API}/setMyCommands" -H 'Content-Type: application/json' -d '{"commands":[]}'
+echo
+curl -sS "${API}/setMyShortDescription" \
+  --data-urlencode 'short_description=Aivory AI agents, right in your Telegram. Just type.'
+echo
+curl -sS "${API}/setMyDescription" \
+  --data-urlencode 'description=Your Aivory AI agent lives here. Deploy an agent from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus.'
+echo
+
+curl -sS "${API}/getWebhookInfo"
 echo

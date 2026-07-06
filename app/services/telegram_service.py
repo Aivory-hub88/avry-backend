@@ -38,10 +38,11 @@ AGENT_TYPES = {
     "finance_invoice_ops": "Finance & Invoice Ops Agent",
 }
 
+# Prompt-only UX: no commands mentioned anywhere. Disconnecting is done from
+# the dashboard; /stop still works but stays undocumented as a fallback.
 WELCOME_TEMPLATE = (
-    "✅ {agent_name} is now connected to this chat.\n\n"
-    "Send a message any time and your Aivory agent will pick it up. "
-    "Send /stop to disconnect."
+    "✅ {agent_name} is connected.\n\n"
+    "Just type what you need — no commands, no menus. I'm ready when you are."
 )
 
 FALLBACK_REPLY = (
@@ -87,6 +88,19 @@ class TelegramService:
         except requests.RequestException as e:
             logger.error(f"sendMessage error: {e}")
             return False
+
+    def send_typing(self, chat_id: int) -> None:
+        """Show the 'typing…' indicator while the agent thinks (best-effort)."""
+        if not settings.telegram_bot_token:
+            return
+        try:
+            requests.post(
+                self._api_url("sendChatAction"),
+                json={"chat_id": chat_id, "action": "typing"},
+                timeout=5,
+            )
+        except requests.RequestException:
+            pass
 
     # ========================================================================
     # LINK TOKENS (one-time, expiring)
@@ -182,6 +196,7 @@ class TelegramService:
         if text.startswith("/start"):
             self._handle_start(chat, text)
         elif text.startswith("/stop"):
+            # Undocumented fallback; the official disconnect lives in the dashboard
             self._handle_stop(chat_id)
         else:
             self._handle_message(chat_id, message)
@@ -261,6 +276,7 @@ class TelegramService:
             self.send_message(chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
             return
 
+        self.send_typing(chat_id)
         reply = self._route_to_agent(binding, message)
         self.send_message(chat_id, reply)
 
