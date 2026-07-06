@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.database.db_service import DatabaseService
 from app.services.auth_service import AuthService
-from app.services.telegram_service import TelegramService, AGENT_TYPES
+from app.services.telegram_service import TelegramService, AGENT_TYPES, get_bot
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,13 +80,16 @@ def list_bindings(user: dict = Depends(get_current_user_payload)):
     return {"bindings": telegram_service.list_bindings(user["user_id"])}
 
 
-@router.delete("/bindings/{chat_id}")
-def delete_binding(chat_id: int, user: dict = Depends(get_current_user_payload)):
-    if not telegram_service.delete_binding(chat_id, user["user_id"]):
+@router.delete("/bindings/{binding_id}")
+def delete_binding(binding_id: str, user: dict = Depends(get_current_user_payload)):
+    binding = telegram_service.delete_binding(binding_id, user["user_id"])
+    if not binding:
         raise HTTPException(status_code=404, detail="Binding not found")
-    telegram_service.send_message(
-        chat_id, "👋 Agent disconnected from your Aivory dashboard."
-    )
+    bot = get_bot(binding.get("agent_type"))
+    if bot:
+        telegram_service.send_message(
+            bot, binding["chat_id"], "👋 Agent disconnected from your Aivory dashboard."
+        )
     return {"success": True}
 
 
@@ -98,17 +101,13 @@ def list_agent_types():
     }
 
 
-@router.post("/webhook")
-async def telegram_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
-):
-    """Receive Bot API updates. Always returns 200 so Telegram never retry-storms."""
-    if not settings.telegram_webhook_secret or (
-        x_telegram_bot_api_secret_token != settings.telegram_webhook_secret
-    ):
+async def _handle_webhook(request: Request, secret: Optional[str], bot: Optional[dict]):
+    """Shared webhook handler. Always returns 200 so Telegram never retry-storms."""
+    if not settings.telegram_webhook_secret or secret != settings.telegram_webhook_secret:
         # Wrong/missing secret: reject so random POSTs can't inject updates
         raise HTTPException(status_code=403, detail="Forbidden")
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not configured")
 
     try:
         update = await request.json()
@@ -119,9 +118,34 @@ async def telegram_webhook(
         # process_update does blocking Bot API calls; keep it off the event loop
         import anyio
 
-        await anyio.to_thread.run_sync(telegram_service.process_update, update)
+        await anyio.to_thread.run_sync(telegram_service.process_update, update, bot)
     except Exception as e:
         # Never bubble errors back to Telegram — log and ack
         logger.error(f"Failed to process Telegram update: {e}", exc_info=True)
 
     return {"ok": True}
+
+
+@router.post("/webhook/{bot_key}")
+async def telegram_webhook_per_bot(
+    bot_key: str,
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
+):
+    """Per-agent bot webhook (multi-bot mode)."""
+    if bot_key not in AGENT_TYPES:
+        raise HTTPException(status_code=404, detail="Unknown bot")
+    return await _handle_webhook(
+        request, x_telegram_bot_api_secret_token, get_bot(bot_key)
+    )
+
+
+@router.post("/webhook")
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: Optional[str] = Header(None),
+):
+    """Legacy single-bot webhook (default bot)."""
+    return await _handle_webhook(
+        request, x_telegram_bot_api_secret_token, get_bot(None)
+    )

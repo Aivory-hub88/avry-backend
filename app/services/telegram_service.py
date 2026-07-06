@@ -8,9 +8,14 @@ Flow:
   3. Token is redeemed: the chat_id is bound to {user_id, agent_type}
   4. Subsequent messages in that chat are routed to the agent backend
 
+Multi-bot: each agent type can have its own bot (TELEGRAM_BOT_TOKEN_<AGENT>,
+TELEGRAM_BOT_USERNAME_<AGENT>); anything unset falls back to the shared default
+bot (TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_USERNAME). Bindings are keyed by
+(bot_id, chat_id) so the same private chat can host a different agent per bot.
+
 Storage follows the MVP file-based convention (DatabaseService JSON collections):
     telegram_link_tokens/{token}.json
-    telegram_bindings/{chat_id}.json
+    telegram_bindings/{bot_id}_{chat_id}.json
 """
 
 import logging
@@ -60,6 +65,29 @@ def is_valid_token_format(token: str) -> bool:
     return bool(_TOKEN_RE.match(token or ""))
 
 
+def get_bot(agent_type: Optional[str]) -> Optional[dict]:
+    """Resolve bot credentials for an agent type.
+
+    Per-agent env vars win; otherwise fall back to the shared default bot.
+    Returns {token, username, bot_id, agent_type} or None if unconfigured.
+    """
+    token = username = None
+    if agent_type:
+        suffix = agent_type.upper()
+        token = os.getenv(f"TELEGRAM_BOT_TOKEN_{suffix}")
+        username = os.getenv(f"TELEGRAM_BOT_USERNAME_{suffix}")
+    token = token or settings.telegram_bot_token
+    username = username or settings.telegram_bot_username
+    if not token or not username:
+        return None
+    return {
+        "token": token,
+        "username": username,
+        "bot_id": token.split(":", 1)[0],
+        "agent_type": agent_type,
+    }
+
+
 class TelegramService:
     """Link tokens, chat bindings, and Bot API calls."""
 
@@ -70,16 +98,16 @@ class TelegramService:
     # BOT API
     # ========================================================================
 
-    def _api_url(self, method: str) -> str:
-        return f"{TELEGRAM_API_BASE}/bot{settings.telegram_bot_token}/{method}"
+    def _api_url(self, method: str, token: str) -> str:
+        return f"{TELEGRAM_API_BASE}/bot{token}/{method}"
 
-    def send_message(self, chat_id: int, text: str) -> bool:
-        if not settings.telegram_bot_token:
-            logger.warning("telegram_bot_token not configured; dropping reply")
+    def send_message(self, bot: dict, chat_id: int, text: str) -> bool:
+        if not bot:
+            logger.warning("No bot configured; dropping reply")
             return False
         try:
             resp = requests.post(
-                self._api_url("sendMessage"),
+                self._api_url("sendMessage", bot["token"]),
                 json={"chat_id": chat_id, "text": text},
                 timeout=10,
             )
@@ -90,13 +118,13 @@ class TelegramService:
             logger.error(f"sendMessage error: {e}")
             return False
 
-    def send_typing(self, chat_id: int) -> None:
+    def send_typing(self, bot: dict, chat_id: int) -> None:
         """Show the 'typing…' indicator while the agent thinks (best-effort)."""
-        if not settings.telegram_bot_token:
+        if not bot:
             return
         try:
             requests.post(
-                self._api_url("sendChatAction"),
+                self._api_url("sendChatAction", bot["token"]),
                 json={"chat_id": chat_id, "action": "typing"},
                 timeout=5,
             )
@@ -118,8 +146,9 @@ class TelegramService:
             raise ValueError(f"Unknown agent_type '{agent_type}'")
         if chat_target not in ("private", "group"):
             raise ValueError("chat_target must be 'private' or 'group'")
-        if not settings.telegram_bot_username:
-            raise RuntimeError("telegram_bot_username is not configured")
+        bot = get_bot(agent_type)
+        if not bot:
+            raise RuntimeError(f"No Telegram bot configured for '{agent_type}'")
 
         # 24 bytes -> 32 url-safe chars, well under Telegram's 64-char start payload limit
         token = secrets.token_urlsafe(24)
@@ -128,6 +157,7 @@ class TelegramService:
             "token": token,
             "user_id": user_id,
             "agent_type": agent_type,
+            "bot_id": bot["bot_id"],
             "chat_target": chat_target,
             "created_at": now.isoformat(),
             "expires_at": (
@@ -140,12 +170,13 @@ class TelegramService:
         self.db.save_json(LINK_TOKENS_COLLECTION, token, record)
 
         param = "startgroup" if chat_target == "group" else "start"
-        deep_link = f"https://t.me/{settings.telegram_bot_username}?{param}={token}"
+        deep_link = f"https://t.me/{bot['username']}?{param}={token}"
         return {
             "token": token,
             "deep_link": deep_link,
             "agent_type": agent_type,
             "agent_name": AGENT_TYPES[agent_type],
+            "bot_username": bot["username"],
             "expires_at": record["expires_at"],
         }
 
@@ -202,27 +233,36 @@ class TelegramService:
         return user.get("status") != "suspended"
 
     # ========================================================================
-    # BINDINGS
+    # BINDINGS — keyed by (bot_id, chat_id)
     # ========================================================================
 
-    def get_binding(self, chat_id: int) -> Optional[dict]:
-        return self.db.load_json(BINDINGS_COLLECTION, str(chat_id))
+    @staticmethod
+    def _binding_id(bot: dict, chat_id: int) -> str:
+        return f"{bot['bot_id']}_{chat_id}"
+
+    def get_binding(self, bot: dict, chat_id: int) -> Optional[dict]:
+        return self.db.load_json(BINDINGS_COLLECTION, self._binding_id(bot, chat_id))
 
     def list_bindings(self, user_id: str) -> list:
         all_bindings = self.db.load_all_json(BINDINGS_COLLECTION) or []
         return [b for b in all_bindings if b.get("user_id") == user_id]
 
-    def delete_binding(self, chat_id: int, user_id: str) -> bool:
-        binding = self.get_binding(chat_id)
+    def delete_binding(self, binding_id: str, user_id: str) -> Optional[dict]:
+        """Delete a user's binding by its id; returns the binding if removed."""
+        if not re.match(r"^\d+_-?\d+$", binding_id or ""):
+            return None
+        binding = self.db.load_json(BINDINGS_COLLECTION, binding_id)
         if not binding or binding.get("user_id") != user_id:
-            return False
-        return self.db.delete_json(BINDINGS_COLLECTION, str(chat_id))
+            return None
+        self.db.delete_json(BINDINGS_COLLECTION, binding_id)
+        return binding
 
     # ========================================================================
     # WEBHOOK UPDATE PROCESSING
     # ========================================================================
 
-    def process_update(self, update: dict) -> None:
+    def process_update(self, update: dict, bot: dict) -> None:
+        """Handle one Bot API update, in the context of the bot that received it."""
         message = update.get("message") or update.get("channel_post")
         if not message:
             return  # ignore edits, callbacks, member updates for now
@@ -234,20 +274,21 @@ class TelegramService:
             return
 
         if text.startswith("/start"):
-            self._handle_start(chat, text)
+            self._handle_start(chat, text, bot)
         elif text.startswith("/stop"):
             # Undocumented fallback; the official disconnect lives in the dashboard
-            self._handle_stop(chat_id)
+            self._handle_stop(chat_id, bot)
         else:
-            self._handle_message(chat_id, message)
+            self._handle_message(chat_id, message, bot)
 
-    def _handle_start(self, chat: dict, text: str) -> None:
+    def _handle_start(self, chat: dict, text: str, bot: dict) -> None:
         chat_id = chat["id"]
         # Accept "/start <token>" and "/start@BotName <token>" (group form)
         parts = text.split(maxsplit=1)
         token = parts[1].strip() if len(parts) > 1 else None
         if not token:
             self.send_message(
+                bot,
                 chat_id,
                 "Hi! To connect an Aivory agent, deploy it from your dashboard "
                 "and scan the QR code shown there.",
@@ -255,25 +296,34 @@ class TelegramService:
             return
 
         if not is_valid_token_format(token):
-            self.send_message(chat_id, "⚠️ This deploy link is invalid or already used. Generate a new one from your dashboard.")
+            self.send_message(bot, chat_id, "⚠️ This deploy link is invalid or already used. Generate a new one from your dashboard.")
             return
 
         record = self.db.load_json(LINK_TOKENS_COLLECTION, token)
         if not record or record.get("used"):
-            self.send_message(chat_id, "⚠️ This deploy link is invalid or already used. Generate a new one from your dashboard.")
+            self.send_message(bot, chat_id, "⚠️ This deploy link is invalid or already used. Generate a new one from your dashboard.")
             return
         if datetime.utcnow().isoformat() > record.get("expires_at", ""):
-            self.send_message(chat_id, "⚠️ This deploy link has expired. Generate a new one from your dashboard.")
+            self.send_message(bot, chat_id, "⚠️ This deploy link has expired. Generate a new one from your dashboard.")
+            return
+
+        # A deploy link is minted for a specific bot — reject cross-bot redemption
+        # (e.g. a Leads QR pasted into the CS bot) so personas stay 1:1 per bot.
+        if record.get("bot_id") and record["bot_id"] != bot["bot_id"]:
+            self.send_message(bot, chat_id, "⚠️ This deploy link belongs to a different Aivory agent. Please scan the QR code again from your dashboard.")
             return
 
         # Subscription guard: the linking user must still exist and be active
         user = self._load_user(record["user_id"])
         if not self._is_active(user):
-            self.send_message(chat_id, "⚠️ This Aivory account is not active. Please check your subscription.")
+            self.send_message(bot, chat_id, "⚠️ This Aivory account is not active. Please check your subscription.")
             return
 
         agent_type = record["agent_type"]
         binding = {
+            "binding_id": self._binding_id(bot, chat_id),
+            "bot_id": bot["bot_id"],
+            "bot_username": bot["username"],
             "chat_id": chat_id,
             "chat_type": chat.get("type", "private"),
             "chat_title": chat.get("title") or chat.get("username") or chat.get("first_name"),
@@ -285,26 +335,29 @@ class TelegramService:
             "linked_token": token,
             "created_at": datetime.utcnow().isoformat(),
         }
-        self.db.save_json(BINDINGS_COLLECTION, str(chat_id), binding)
+        self.db.save_json(BINDINGS_COLLECTION, binding["binding_id"], binding)
 
         record["used"] = True
         record["used_at"] = datetime.utcnow().isoformat()
         record["chat_id"] = chat_id
         self.db.save_json(LINK_TOKENS_COLLECTION, token, record)
 
-        logger.info(f"Bound Telegram chat {chat_id} to user {record['user_id']} ({agent_type})")
-        self.send_message(chat_id, WELCOME_TEMPLATE.format(agent_name=binding["agent_name"]))
+        logger.info(
+            f"Bound Telegram chat {chat_id} (bot {bot['username']}) "
+            f"to user {record['user_id']} ({agent_type})"
+        )
+        self.send_message(bot, chat_id, WELCOME_TEMPLATE.format(agent_name=binding["agent_name"]))
 
-    def _handle_stop(self, chat_id: int) -> None:
-        binding = self.get_binding(chat_id)
+    def _handle_stop(self, chat_id: int, bot: dict) -> None:
+        binding = self.get_binding(bot, chat_id)
         if binding:
-            self.db.delete_json(BINDINGS_COLLECTION, str(chat_id))
-            self.send_message(chat_id, "👋 Agent disconnected. Scan a new QR code from your dashboard to reconnect.")
+            self.db.delete_json(BINDINGS_COLLECTION, self._binding_id(bot, chat_id))
+            self.send_message(bot, chat_id, "👋 Agent disconnected. Scan a new QR code from your dashboard to reconnect.")
         else:
-            self.send_message(chat_id, "No agent is connected to this chat.")
+            self.send_message(bot, chat_id, "No agent is connected to this chat.")
 
-    def _handle_message(self, chat_id: int, message: dict) -> None:
-        binding = self.get_binding(chat_id)
+    def _handle_message(self, chat_id: int, message: dict, bot: dict) -> None:
+        binding = self.get_binding(bot, chat_id)
         if not binding:
             return  # unbound chats get no reply; keeps the shared bot quiet
 
@@ -312,13 +365,13 @@ class TelegramService:
         # subscriptions stop working without a manual unbind
         user = self._load_user(binding["user_id"])
         if not self._is_active(user):
-            self.db.delete_json(BINDINGS_COLLECTION, str(chat_id))
-            self.send_message(chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
+            self.db.delete_json(BINDINGS_COLLECTION, self._binding_id(bot, chat_id))
+            self.send_message(bot, chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
             return
 
-        self.send_typing(chat_id)
+        self.send_typing(bot, chat_id)
         reply = self._route_to_agent(binding, message)
-        self.send_message(chat_id, reply)
+        self.send_message(bot, chat_id, reply)
 
     def _route_to_agent(self, binding: dict, message: dict) -> str:
         """Forward a bound chat message to the agent gateway, if configured."""
@@ -337,6 +390,8 @@ class TelegramService:
                     "agent_type": binding["agent_type"],
                     "account_type": binding.get("account_type", "free"),
                     "chat_id": binding["chat_id"],
+                    # unique per (bot, chat) so agent histories never merge
+                    "session_id": binding.get("binding_id") or str(binding["chat_id"]),
                     "text": message.get("text", ""),
                 },
                 timeout=60,
