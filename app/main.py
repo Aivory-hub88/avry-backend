@@ -57,6 +57,13 @@ except Exception as e:
     print(f"[!] Warning: Could not import admin users routes: {e}")
     admin_users_router = None
 
+try:
+    from app.routes.telegram import router as telegram_router
+    print("[✓] Telegram routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import telegram routes: {e}")
+    telegram_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -198,6 +205,9 @@ if logs_router:
 
 if admin_users_router:
     app.include_router(admin_users_router)
+
+if telegram_router:
+    app.include_router(telegram_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")

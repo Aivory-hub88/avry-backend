@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     n8n_base_url: str = "http://43.156.108.96:5678"
     n8n_timeout: float = 10.0
     n8n_max_retries: int = 3
+
+    # Telegram deployable-agent configuration
+    telegram_bot_token: Optional[str] = None
+    telegram_bot_username: Optional[str] = None  # without @, used to build t.me deep links
+    telegram_webhook_secret: Optional[str] = None  # sent back by Telegram as X-Telegram-Bot-Api-Secret-Token
+    telegram_link_token_ttl_minutes: int = 10
+    # Optional downstream gateway that answers agent messages (e.g. zeroclaw bridge).
+    # When unset, bound chats get a static acknowledgement reply.
+    telegram_agent_gateway_url: Optional[str] = None
     
     # CORS configuration
     cors_origins: list[str] = ["*"]
