@@ -14,6 +14,7 @@ Storage follows the MVP file-based convention (DatabaseService JSON collections)
 """
 
 import logging
+import os
 import re
 import secrets
 from datetime import datetime, timedelta
@@ -162,6 +163,45 @@ class TelegramService:
         return {"status": "pending"}
 
     # ========================================================================
+    # USER LOOKUP (Postgres in prod, JSON files in dev)
+    # ========================================================================
+
+    def _load_user(self, user_id: str) -> Optional[dict]:
+        """Auth users live in Postgres on prod; fall back to the file store."""
+        dsn = os.getenv("DATABASE_URL")
+        if dsn:
+            try:
+                import psycopg2
+
+                conn = psycopg2.connect(dsn, connect_timeout=5)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT id, account_type, is_active FROM users WHERE id = %s",
+                            (user_id,),
+                        )
+                        row = cur.fetchone()
+                    if row:
+                        return {
+                            "user_id": row[0],
+                            "account_type": row[1] or "free",
+                            "is_active": row[2],
+                        }
+                finally:
+                    conn.close()
+            except Exception as e:
+                logger.error(f"Postgres user lookup failed, using file store: {e}")
+        return self.db.load_json("users", user_id)
+
+    @staticmethod
+    def _is_active(user: Optional[dict]) -> bool:
+        if not user:
+            return False
+        if user.get("is_active") is False:
+            return False
+        return user.get("status") != "suspended"
+
+    # ========================================================================
     # BINDINGS
     # ========================================================================
 
@@ -227,8 +267,8 @@ class TelegramService:
             return
 
         # Subscription guard: the linking user must still exist and be active
-        user = self.db.load_json("users", record["user_id"])
-        if not user or user.get("status") == "suspended":
+        user = self._load_user(record["user_id"])
+        if not self._is_active(user):
             self.send_message(chat_id, "⚠️ This Aivory account is not active. Please check your subscription.")
             return
 
@@ -270,8 +310,8 @@ class TelegramService:
 
         # Re-check the owning account on every message so cancelled
         # subscriptions stop working without a manual unbind
-        user = self.db.load_json("users", binding["user_id"])
-        if not user or user.get("status") == "suspended":
+        user = self._load_user(binding["user_id"])
+        if not self._is_active(user):
             self.db.delete_json(BINDINGS_COLLECTION, str(chat_id))
             self.send_message(chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
             return
