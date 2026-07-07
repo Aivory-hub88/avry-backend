@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # Optional downstream gateway that answers agent messages (e.g. zeroclaw bridge).
     # When unset, bound chats get a static acknowledgement reply.
     telegram_agent_gateway_url: Optional[str] = None
+
+    # Slack deployable-agent configuration
+    slack_client_id: Optional[str] = None
+    slack_client_secret: Optional[str] = None
+    slack_signing_secret: Optional[str] = None
+    # Where the OAuth callback sends the user after a successful install
+    slack_post_install_redirect: str = "https://aivory.id/dashboard/agents?slack=connected"
     
     # CORS configuration
     cors_origins: list[str] = ["*"]
