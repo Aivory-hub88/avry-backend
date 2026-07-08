@@ -269,9 +269,13 @@ class TelegramService:
 
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
-        text = (message.get("text") or "").strip()
-        if chat_id is None or not text:
+        if chat_id is None:
             return
+
+        text = (message.get("text") or "").strip()
+        has_attachment = bool(message.get("document") or message.get("photo"))
+        if not text and not has_attachment:
+            return  # stickers, location, etc. — nothing to act on
 
         if text.startswith("/start"):
             self._handle_start(chat, text, bot)
@@ -370,11 +374,70 @@ class TelegramService:
             return
 
         self.send_typing(bot, chat_id)
-        reply = self._route_to_agent(binding, message)
+        prompt = self._build_prompt(bot, message)
+        if not prompt:
+            return  # nothing readable (e.g. unsupported file with no caption)
+        reply = self._route_to_agent(binding, prompt)
         self.send_message(bot, chat_id, reply)
 
-    def _route_to_agent(self, binding: dict, message: dict) -> str:
-        """Forward a bound chat message to the agent gateway, if configured."""
+    # ------------------------------------------------------------------
+    # Attachment handling
+    # ------------------------------------------------------------------
+
+    def _download_file(self, bot: dict, file_id: str) -> Optional[bytes]:
+        """Resolve a Telegram file_id to bytes (getFile + download)."""
+        try:
+            info = requests.get(
+                self._api_url("getFile", bot["token"]),
+                params={"file_id": file_id},
+                timeout=15,
+            ).json()
+            if not info.get("ok"):
+                return None
+            path = info["result"]["file_path"]
+            dl = requests.get(
+                f"{TELEGRAM_API_BASE}/file/bot{bot['token']}/{path}", timeout=30
+            )
+            return dl.content if dl.ok else None
+        except (requests.RequestException, ValueError, KeyError) as e:
+            logger.error(f"Telegram file download failed: {e}")
+            return None
+
+    def _build_prompt(self, bot: dict, message: dict) -> str:
+        """Compose the agent prompt from the message text + any attachment."""
+        from app.services import attachment_extractor as ax
+
+        caption = (message.get("text") or message.get("caption") or "").strip()
+        attachments = []
+
+        doc = message.get("document")
+        if doc and doc.get("file_id"):
+            data = self._download_file(bot, doc["file_id"])
+            if data:
+                name = doc.get("file_name") or "document"
+                mime = doc.get("mime_type")
+                if ax.is_image(name, mime):
+                    content = ax.describe_image(data, mime or "image/jpeg", caption)
+                    attachments.append({"filename": name, "content": content, "kind": "image"})
+                else:
+                    content = ax.extract_document_text(name, data, mime)
+                    if content is None:
+                        content = f"[Received an unsupported file type: {name}]"
+                    attachments.append({"filename": name, "content": content, "kind": "document"})
+
+        photos = message.get("photo")
+        if photos:
+            # photo is a list of sizes ascending; grab the largest
+            largest = photos[-1]
+            data = self._download_file(bot, largest["file_id"])
+            if data:
+                content = ax.describe_image(data, "image/jpeg", caption)
+                attachments.append({"filename": "photo.jpg", "content": content, "kind": "image"})
+
+        return ax.compose_prompt(caption, attachments)
+
+    def _route_to_agent(self, binding: dict, text: str) -> str:
+        """Forward the composed prompt to the agent gateway, if configured."""
         if not settings.telegram_agent_gateway_url:
             return FALLBACK_REPLY
         headers = {}
@@ -392,9 +455,9 @@ class TelegramService:
                     "chat_id": binding["chat_id"],
                     # unique per (bot, chat) so agent histories never merge
                     "session_id": binding.get("binding_id") or str(binding["chat_id"]),
-                    "text": message.get("text", ""),
+                    "text": text,
                 },
-                timeout=60,
+                timeout=90,
             )
             if resp.ok:
                 return (resp.json().get("reply") or FALLBACK_REPLY)[:4096]

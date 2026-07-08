@@ -36,8 +36,8 @@ SLACK_API_BASE = "https://slack.com/api"
 LINK_TOKENS_COLLECTION = "slack_link_tokens"
 INSTALLATIONS_COLLECTION = "slack_installations"
 
-# Bot scopes: receive DMs + mentions, reply in both
-OAUTH_SCOPES = "app_mentions:read,chat:write,im:history"
+# Bot scopes: receive DMs + mentions, reply in both, download shared files
+OAUTH_SCOPES = "app_mentions:read,chat:write,im:history,files:read"
 
 FALLBACK_REPLY = (
     "🤖 Your Aivory agent received the message. "
@@ -268,8 +268,10 @@ class SlackService:
         etype = event.get("type")
         if etype not in ("message", "app_mention"):
             return
-        # Ignore bot messages (including our own replies) and message edits
-        if event.get("bot_id") or event.get("subtype"):
+        # Ignore bot messages (including our own replies) and message edits.
+        # Allow "file_share" through — that's how a DM'd document/image arrives.
+        subtype = event.get("subtype")
+        if event.get("bot_id") or (subtype and subtype != "file_share"):
             return
         # Plain channel messages arrive as type "message" too — only respond
         # to DMs there; channels require an @mention
@@ -285,14 +287,13 @@ class SlackService:
 
         text = (event.get("text") or "").strip()
         channel = event.get("channel")
-        if not text or not channel:
+        files = event.get("files") or []
+        if (not text and not files) or not channel:
             return
         # Strip the leading @mention so the agent sees a clean prompt
         bot_user = installation.get("bot_user_id")
         if bot_user:
             text = text.replace(f"<@{bot_user}>", "").strip()
-        if not text:
-            return
 
         # Subscription guard — same semantics as Telegram
         from app.services.telegram_service import TelegramService
@@ -307,8 +308,53 @@ class SlackService:
             self.db.delete_json(INSTALLATIONS_COLLECTION, team_id)
             return
 
-        reply = self._route_to_agent(installation, channel, text)
+        prompt = self._build_prompt(installation["bot_token"], text, files)
+        if not prompt:
+            return
+        reply = self._route_to_agent(installation, channel, prompt)
         self.post_message(installation["bot_token"], channel, reply)
+
+    def _download_slack_file(self, bot_token: str, url_private: str) -> Optional[bytes]:
+        """Download a Slack file via its private URL using the bot token."""
+        try:
+            resp = requests.get(
+                url_private,
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=30,
+            )
+            # Slack returns an HTML login page (200) instead of 401 when the
+            # token lacks files:read — guard against storing that as content
+            ctype = resp.headers.get("content-type", "")
+            if resp.ok and "text/html" not in ctype:
+                return resp.content
+            logger.error(f"Slack file download rejected (content-type={ctype})")
+        except requests.RequestException as e:
+            logger.error(f"Slack file download failed: {e}")
+        return None
+
+    def _build_prompt(self, bot_token: str, text: str, files: list) -> str:
+        from app.services import attachment_extractor as ax
+
+        attachments = []
+        for f in files[:5]:  # cap per message
+            url = f.get("url_private_download") or f.get("url_private")
+            if not url:
+                continue
+            data = self._download_slack_file(bot_token, url)
+            if not data:
+                continue
+            name = f.get("name") or "attachment"
+            mime = f.get("mimetype")
+            if ax.is_image(name, mime):
+                content = ax.describe_image(data, mime or "image/jpeg", text)
+                attachments.append({"filename": name, "content": content, "kind": "image"})
+            else:
+                content = ax.extract_document_text(name, data, mime)
+                if content is None:
+                    content = f"[Received an unsupported file type: {name}]"
+                attachments.append({"filename": name, "content": content, "kind": "document"})
+
+        return ax.compose_prompt(text, attachments)
 
     def _route_to_agent(self, installation: dict, channel: str, text: str) -> str:
         if not settings.telegram_agent_gateway_url:
