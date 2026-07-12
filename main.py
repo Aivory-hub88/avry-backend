@@ -87,6 +87,13 @@ except Exception as e:
     print(f"[!] Logs routes failed: {e}")
 
 try:
+    from app.routes.agent_actions import router as agent_actions_router
+    app.include_router(agent_actions_router)
+    print("[OK] Agent actions routes registered")
+except Exception as e:
+    print(f"[!] Agent actions routes failed: {e}")
+
+try:
     from app.routes.admin_users import router as admin_users_router
     app.include_router(admin_users_router)
     print("[OK] Admin users routes registered")

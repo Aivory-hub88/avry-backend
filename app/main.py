@@ -71,6 +71,13 @@ except Exception as e:
     print(f"[!] Warning: Could not import slack routes: {e}")
     slack_router = None
 
+try:
+    from app.routes.agent_actions import router as agent_actions_router
+    print("[✓] Agent actions routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import agent actions routes: {e}")
+    agent_actions_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -217,6 +224,8 @@ if telegram_router:
     app.include_router(telegram_router)
 if slack_router:
     app.include_router(slack_router)
+if agent_actions_router:
+    app.include_router(agent_actions_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")
