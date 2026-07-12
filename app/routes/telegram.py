@@ -21,7 +21,12 @@ from pydantic import BaseModel
 from app.config import settings
 from app.database.db_service import DatabaseService
 from app.services.auth_service import AuthService
-from app.services.telegram_service import TelegramService, AGENT_TYPES, get_bot
+from app.services.telegram_service import (
+    TelegramService,
+    AGENT_TYPES,
+    agent_tier_error,
+    get_bot,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,6 +74,32 @@ def create_deploy_link(
     except RuntimeError as e:
         logger.error(f"Telegram not configured: {e}")
         raise HTTPException(status_code=503, detail="Telegram integration is not configured")
+
+
+class AgentChatRequest(BaseModel):
+    agent_type: str
+    text: str
+    conversation_id: Optional[str] = None
+
+
+@router.post("/agent-chat")
+def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_payload)):
+    """Talk to a deployable agent from the dashboard AI Console (JWT auth)."""
+    if body.agent_type not in AGENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type '{body.agent_type}'")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
+    tier_err = agent_tier_error(record, body.agent_type)
+    if tier_err:
+        raise HTTPException(status_code=403, detail=tier_err)
+
+    reply = telegram_service.route_console_message(
+        record, body.agent_type, text[:8000], body.conversation_id
+    )
+    return {"reply": reply, "agent_type": body.agent_type, "agent_name": AGENT_TYPES[body.agent_type]}
 
 
 @router.get("/link-status/{token}")

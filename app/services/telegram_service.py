@@ -497,7 +497,7 @@ class TelegramService:
 
         return ax.compose_prompt(caption, attachments)
 
-    def _route_to_agent(self, binding: dict, text: str) -> str:
+    def _route_to_agent(self, binding: dict, text: str, channel: str = "telegram") -> str:
         """Forward the composed prompt to the agent gateway, if configured."""
         if not settings.telegram_agent_gateway_url:
             return FALLBACK_REPLY
@@ -517,6 +517,7 @@ class TelegramService:
                     # unique per (bot, chat) so agent histories never merge
                     "session_id": binding.get("binding_id") or str(binding["chat_id"]),
                     "text": text,
+                    "channel": channel,
                 },
                 timeout=90,
             )
@@ -526,3 +527,20 @@ class TelegramService:
         except (requests.RequestException, ValueError) as e:
             logger.error(f"Agent gateway error: {e}")
         return "⚠️ The agent is temporarily unavailable. Please try again in a moment."
+
+    def route_console_message(
+        self, user: dict, agent_type: str, text: str, conversation_id: Optional[str] = None
+    ) -> str:
+        """Talk to a deployable agent from the dashboard AI Console.
+
+        No chat binding involved — the console session id keeps agent history
+        separate from any Telegram/Slack chats of the same agent.
+        """
+        pseudo_binding = {
+            "user_id": user["user_id"],
+            "account_type": user.get("account_type", "free"),
+            "agent_type": agent_type,
+            "chat_id": 0,
+            "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
+        }
+        return self._route_to_agent(pseudo_binding, text, channel="console")
