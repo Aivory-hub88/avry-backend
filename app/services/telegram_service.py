@@ -42,7 +42,28 @@ AGENT_TYPES = {
     "customer_service": "Customer Service Agent",
     "leads_qualifier": "Leads Qualifier Agent",
     "finance_invoice_ops": "Finance & Invoice Ops Agent",
+    "office_assistant": "Office Assistant Agent",
 }
+
+# Minimum subscription tier per agent type (tiers: foundation < pro < enterprise;
+# there is no free tier). Unlisted agents are available on every paid tier.
+AGENT_MIN_TIER = {
+    "office_assistant": "enterprise",
+}
+
+_TIER_ORDER = {"foundation": 0, "pro": 1, "enterprise": 2}
+
+
+def agent_tier_error(user, agent_type: str):
+    """Return an error message if the user's tier can't deploy this agent, else None."""
+    required = AGENT_MIN_TIER.get(agent_type)
+    if not required:
+        return None
+    tier = str((user or {}).get("tier") or "foundation").lower()
+    if _TIER_ORDER.get(tier, 0) < _TIER_ORDER.get(required, 99):
+        name = AGENT_TYPES.get(agent_type, agent_type)
+        return f"{name} is available on the Enterprise plan. Upgrade to deploy it."
+    return None
 
 # Prompt-only UX: no commands mentioned anywhere. Disconnecting is done from
 # the dashboard; /stop still works but stays undocumented as a fallback.
@@ -63,6 +84,52 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 def is_valid_token_format(token: str) -> bool:
     return bool(_TOKEN_RE.match(token or ""))
+
+
+def load_user_record(db, user_id: str) -> Optional[dict]:
+    """Load a user (+ current subscription tier) — Postgres on prod, file store in dev.
+
+    The tier lives in user_tiers (written by the payments flow); an expired
+    entitlement row counts as the base tier.
+    """
+    dsn = os.getenv("DATABASE_URL")
+    if dsn:
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(dsn, connect_timeout=5)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT u.id, u.account_type, u.is_active,
+                               t.tier, t.expires_at
+                        FROM users u
+                        LEFT JOIN user_tiers t ON t.user_id = u.id
+                        WHERE u.id = %s
+                        """,
+                        (user_id,),
+                    )
+                    row = cur.fetchone()
+                if row:
+                    tier = row[3]
+                    expires_at = row[4]
+                    if expires_at is not None and expires_at < datetime.utcnow():
+                        tier = None  # entitlement lapsed
+                    return {
+                        "user_id": row[0],
+                        "account_type": row[1] or "free",
+                        "is_active": row[2],
+                        "tier": (tier or "foundation").lower(),
+                    }
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"Postgres user lookup failed, using file store: {e}")
+    user = db.load_json("users", user_id)
+    if user is not None and not user.get("tier"):
+        user["tier"] = "foundation"
+    return user
 
 
 def get_bot(agent_type: Optional[str]) -> Optional[dict]:
@@ -146,6 +213,9 @@ class TelegramService:
             raise ValueError(f"Unknown agent_type '{agent_type}'")
         if chat_target not in ("private", "group"):
             raise ValueError("chat_target must be 'private' or 'group'")
+        tier_err = agent_tier_error(self._load_user(user_id), agent_type)
+        if tier_err:
+            raise PermissionError(tier_err)
         bot = get_bot(agent_type)
         if not bot:
             raise RuntimeError(f"No Telegram bot configured for '{agent_type}'")
@@ -198,31 +268,7 @@ class TelegramService:
     # ========================================================================
 
     def _load_user(self, user_id: str) -> Optional[dict]:
-        """Auth users live in Postgres on prod; fall back to the file store."""
-        dsn = os.getenv("DATABASE_URL")
-        if dsn:
-            try:
-                import psycopg2
-
-                conn = psycopg2.connect(dsn, connect_timeout=5)
-                try:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT id, account_type, is_active FROM users WHERE id = %s",
-                            (user_id,),
-                        )
-                        row = cur.fetchone()
-                    if row:
-                        return {
-                            "user_id": row[0],
-                            "account_type": row[1] or "free",
-                            "is_active": row[2],
-                        }
-                finally:
-                    conn.close()
-            except Exception as e:
-                logger.error(f"Postgres user lookup failed, using file store: {e}")
-        return self.db.load_json("users", user_id)
+        return load_user_record(self.db, user_id)
 
     @staticmethod
     def _is_active(user: Optional[dict]) -> bool:
@@ -324,6 +370,10 @@ class TelegramService:
             return
 
         agent_type = record["agent_type"]
+        tier_err = agent_tier_error(user, agent_type)
+        if tier_err:
+            self.send_message(bot, chat_id, f"⚠️ {tier_err}")
+            return
         binding = {
             "binding_id": self._binding_id(bot, chat_id),
             "bot_id": bot["bot_id"],
@@ -333,6 +383,7 @@ class TelegramService:
             "chat_title": chat.get("title") or chat.get("username") or chat.get("first_name"),
             "user_id": record["user_id"],
             "account_type": user.get("account_type", "free"),
+            "tier": user.get("tier", "foundation"),
             "agent_type": agent_type,
             "agent_name": AGENT_TYPES.get(agent_type, agent_type),
             "status": "active",

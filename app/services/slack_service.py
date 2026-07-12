@@ -27,7 +27,7 @@ from typing import Optional
 import requests
 
 from app.config import settings
-from app.services.telegram_service import AGENT_TYPES, is_valid_token_format
+from app.services.telegram_service import AGENT_TYPES, agent_tier_error, is_valid_token_format, load_user_record
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,9 @@ class SlackService:
     def create_install_link(self, user_id: str, agent_type: str) -> dict:
         if agent_type not in AGENT_TYPES:
             raise ValueError(f"Unknown agent_type '{agent_type}'")
+        tier_err = agent_tier_error(load_user_record(self.db, user_id), agent_type)
+        if tier_err:
+            raise PermissionError(tier_err)
         if not settings.slack_client_id:
             raise RuntimeError("Slack app is not configured")
 

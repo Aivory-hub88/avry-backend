@@ -43,6 +43,7 @@ ACTION_TYPES = {
     "anomaly",       # finance_invoice_ops: flagged anomaly
     "workflow",      # any agent: n8n workflow triggered
     "integration",   # any agent: Composio action executed (e.g. email sent)
+    "meeting",       # autonomous/office: structured meeting summary (Enterprise)
 }
 
 MAX_PAYLOAD_CHARS = 8000

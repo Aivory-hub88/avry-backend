@@ -62,6 +62,8 @@ def create_deploy_link(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except RuntimeError as e:
         logger.error(f"Slack not configured: {e}")
         raise HTTPException(status_code=503, detail="Slack integration is not configured")
