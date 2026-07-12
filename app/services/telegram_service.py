@@ -54,10 +54,18 @@ AGENT_MIN_TIER = {
 _TIER_ORDER = {"foundation": 0, "pro": 1, "enterprise": 2}
 
 
+def is_superadmin(user) -> bool:
+    """Superadmins bypass tier gates (monitoring + feature testing)."""
+    u = user or {}
+    return bool(u.get("is_superadmin")) or str(u.get("account_type") or "").lower() == "superadmin"
+
+
 def agent_tier_error(user, agent_type: str):
     """Return an error message if the user's tier can't deploy this agent, else None."""
     required = AGENT_MIN_TIER.get(agent_type)
     if not required:
+        return None
+    if is_superadmin(user):
         return None
     tier = str((user or {}).get("tier") or "foundation").lower()
     if _TIER_ORDER.get(tier, 0) < _TIER_ORDER.get(required, 99):
@@ -102,7 +110,7 @@ def load_user_record(db, user_id: str) -> Optional[dict]:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        SELECT u.id, u.account_type, u.is_active,
+                        SELECT u.id, u.account_type, u.is_active, u.is_superadmin,
                                t.tier, t.expires_at
                         FROM users u
                         LEFT JOIN user_tiers t ON t.user_id = u.id
@@ -112,14 +120,15 @@ def load_user_record(db, user_id: str) -> Optional[dict]:
                     )
                     row = cur.fetchone()
                 if row:
-                    tier = row[3]
-                    expires_at = row[4]
+                    tier = row[4]
+                    expires_at = row[5]
                     if expires_at is not None and expires_at < datetime.utcnow():
                         tier = None  # entitlement lapsed
                     return {
                         "user_id": row[0],
                         "account_type": row[1] or "free",
                         "is_active": row[2],
+                        "is_superadmin": bool(row[3]),
                         "tier": (tier or "foundation").lower(),
                     }
             finally:
@@ -383,7 +392,8 @@ class TelegramService:
             "chat_title": chat.get("title") or chat.get("username") or chat.get("first_name"),
             "user_id": record["user_id"],
             "account_type": user.get("account_type", "free"),
-            "tier": user.get("tier", "foundation"),
+            # superadmins get the effective top tier (monitoring/testing access)
+            "tier": "enterprise" if is_superadmin(user) else user.get("tier", "foundation"),
             "agent_type": agent_type,
             "agent_name": AGENT_TYPES.get(agent_type, agent_type),
             "status": "active",
