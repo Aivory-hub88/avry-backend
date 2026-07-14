@@ -78,6 +78,20 @@ except Exception as e:
     print(f"[!] Warning: Could not import agent actions routes: {e}")
     agent_actions_router = None
 
+try:
+    from app.routes.agent_profiles import router as agent_profiles_router
+    print("[✓] Agent profiles routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import agent profiles routes: {e}")
+    agent_profiles_router = None
+
+try:
+    from app.routes.credits import router as credits_router
+    print("[✓] Credits routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import credits routes: {e}")
+    credits_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -226,6 +240,10 @@ if slack_router:
     app.include_router(slack_router)
 if agent_actions_router:
     app.include_router(agent_actions_router)
+if agent_profiles_router:
+    app.include_router(agent_profiles_router)
+if credits_router:
+    app.include_router(credits_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")
