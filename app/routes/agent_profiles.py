@@ -44,7 +44,7 @@ FIELD_CAPS = {
     "agent_name": 80,
     "business_name": 120,
     "tone": 200,
-    "language_pref": 60,
+    "language_pref": 200,  # comma-separated list from the dashboard multi-select
     "business_description": 1500,
     "knowledge": 4000,
     "custom_instructions": 1500,
