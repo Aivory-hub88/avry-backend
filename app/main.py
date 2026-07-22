@@ -79,6 +79,13 @@ except Exception as e:
     agent_actions_router = None
 
 try:
+    from app.routes.trap_hits import router as trap_hits_router
+    print("[✓] Trap hits routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import trap hits routes: {e}")
+    trap_hits_router = None
+
+try:
     from app.routes.agent_profiles import router as agent_profiles_router
     print("[✓] Agent profiles routes registered")
 except Exception as e:
@@ -244,6 +251,8 @@ if agent_profiles_router:
     app.include_router(agent_profiles_router)
 if credits_router:
     app.include_router(credits_router)
+if trap_hits_router:
+    app.include_router(trap_hits_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")
