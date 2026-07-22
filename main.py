@@ -108,6 +108,13 @@ except Exception as e:
     print(f"[!] Credits routes failed: {e}")
 
 try:
+    from app.routes.trap_hits import router as trap_hits_router
+    app.include_router(trap_hits_router)
+    print("[OK] Trap hits routes registered")
+except Exception as e:
+    print(f"[!] Trap hits routes failed: {e}")
+
+try:
     from app.routes.admin_users import router as admin_users_router
     app.include_router(admin_users_router)
     print("[OK] Admin users routes registered")
