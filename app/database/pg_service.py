@@ -7,6 +7,7 @@ lives in the JSON file store — db_service.py is unchanged.
 """
 
 import asyncpg
+import json
 import os
 import logging
 from typing import Optional
@@ -191,6 +192,24 @@ BEGIN
         ALTER TABLE users ADD COLUMN allowed_modules TEXT[];
     END IF;
 END $$;
+
+-- Agent catalog — admin-curated agents published to the user dashboard's
+-- Agents page. See app/routes/agent_catalog.py.
+CREATE TABLE IF NOT EXISTS agent_catalog (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT,
+    category    TEXT DEFAULT 'general',
+    icon        TEXT,
+    tags        TEXT[] DEFAULT '{}',
+    status      TEXT DEFAULT 'draft',
+    config      JSONB DEFAULT '{}'::jsonb,
+    created_by  TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_catalog_status ON agent_catalog(status);
 """
 
 
@@ -314,3 +333,106 @@ async def get_user_from_refresh_token(refresh_token: str) -> Optional[dict]:
         refresh_token,
     )
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Agent catalog CRUD (see app/routes/agent_catalog.py)
+# ---------------------------------------------------------------------------
+
+_AGENT_CATALOG_COLUMNS = (
+    "id, name, description, category, icon, tags, status, config, "
+    "created_by, created_at, updated_at"
+)
+
+
+def _row_to_agent_catalog(row) -> dict:
+    d = dict(row)
+    if isinstance(d.get("config"), str):
+        try:
+            d["config"] = json.loads(d["config"])
+        except (TypeError, ValueError):
+            d["config"] = {}
+    return d
+
+
+async def list_agent_catalog(status: Optional[str] = None) -> list:
+    pool = await get_pool()
+    if status:
+        rows = await pool.fetch(
+            f"SELECT {_AGENT_CATALOG_COLUMNS} FROM agent_catalog "
+            "WHERE status = $1 ORDER BY created_at DESC",
+            status,
+        )
+    else:
+        rows = await pool.fetch(
+            f"SELECT {_AGENT_CATALOG_COLUMNS} FROM agent_catalog ORDER BY created_at DESC"
+        )
+    return [_row_to_agent_catalog(r) for r in rows]
+
+
+async def get_agent_catalog(aid: str) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        f"SELECT {_AGENT_CATALOG_COLUMNS} FROM agent_catalog WHERE id = $1",
+        aid,
+    )
+    return _row_to_agent_catalog(row) if row else None
+
+
+async def insert_agent_catalog(data: dict) -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        f"""
+        INSERT INTO agent_catalog (id, name, description, category, icon, tags, status, config, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)
+        RETURNING {_AGENT_CATALOG_COLUMNS}
+        """,
+        data["id"],
+        data["name"],
+        data.get("description"),
+        data.get("category") or "general",
+        data.get("icon"),
+        data.get("tags") or [],
+        data.get("status") or "draft",
+        json.dumps(data.get("config") or {}),
+        data.get("created_by"),
+    )
+    return _row_to_agent_catalog(row)
+
+
+async def update_agent_catalog(aid: str, data: dict) -> Optional[dict]:
+    pool = await get_pool()
+    existing = await pool.fetchrow("SELECT id FROM agent_catalog WHERE id = $1", aid)
+    if not existing:
+        return None
+
+    fields = []
+    values = []
+    for key in ("name", "description", "category", "icon", "status"):
+        if key in data:
+            fields.append(f"{key} = ${len(values) + 1}")
+            values.append(data[key])
+    if "tags" in data:
+        fields.append(f"tags = ${len(values) + 1}")
+        values.append(data["tags"] or [])
+    if "config" in data:
+        fields.append(f"config = ${len(values) + 1}::jsonb")
+        values.append(json.dumps(data["config"] or {}))
+
+    if not fields:
+        return await get_agent_catalog(aid)
+
+    fields.append("updated_at = NOW()")
+    values.append(aid)
+    row = await pool.fetchrow(
+        f"UPDATE agent_catalog SET {', '.join(fields)} WHERE id = ${len(values)} "
+        f"RETURNING {_AGENT_CATALOG_COLUMNS}",
+        *values,
+    )
+    return _row_to_agent_catalog(row) if row else None
+
+
+async def delete_agent_catalog(aid: str) -> bool:
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM agent_catalog WHERE id = $1", aid)
+    return result == "DELETE 1"
