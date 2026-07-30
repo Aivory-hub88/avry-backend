@@ -354,6 +354,53 @@ async def reset_account_password(
     return result
 
 
+# ── PATCH /api/v1/admin/admin-accounts/{id}/modules ───────────────────────────
+
+
+@router.patch("/admin-accounts/{user_id}/modules")
+async def update_account_modules(
+    user_id: str,
+    body: dict,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Update a demo account's module allowlist. Any admin or superadmin may
+    call this (same privilege level as creating a demo account) — it only
+    ever touches `demo` accounts, never admin/superadmin ones.
+    """
+    await require_admin(authorization)
+
+    pool = await pg.get_pool()
+    target = await pool.fetchrow(
+        "SELECT id, account_type FROM users WHERE id = $1", user_id
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target["account_type"] != "demo":
+        raise HTTPException(
+            status_code=400,
+            detail="Module access can only be edited for demo accounts",
+        )
+
+    raw_modules = body.get("allowedModules")
+    if not isinstance(raw_modules, list) or not all(isinstance(m, str) for m in raw_modules):
+        raise HTTPException(status_code=400, detail="allowedModules must be a list of strings")
+    invalid = [m for m in raw_modules if m not in VALID_MODULE_KEYS]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown module(s): {', '.join(invalid)}")
+
+    # 'console' is the demo home route — always included.
+    allowed_modules = sorted(set(raw_modules) | {"console"})
+
+    await pool.execute(
+        "UPDATE users SET allowed_modules = $1, updated_at = NOW() WHERE id = $2",
+        allowed_modules, user_id,
+    )
+
+    return {"success": True, "allowedModules": allowed_modules}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
