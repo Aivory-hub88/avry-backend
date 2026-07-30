@@ -178,6 +178,19 @@ BEGIN
         ALTER TABLE users ADD COLUMN impersonation_permission BOOLEAN DEFAULT false;
     END IF;
 END $$;
+
+-- Per-account module allowlist for restricted (demo) accounts. NULL means
+-- "not a restricted account" / "use the default set" — see
+-- app/routes/admin_users.py VALID_MODULE_KEYS / DEFAULT_DEMO_MODULES.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='allowed_modules'
+    ) THEN
+        ALTER TABLE users ADD COLUMN allowed_modules TEXT[];
+    END IF;
+END $$;
 """
 
 
@@ -195,7 +208,7 @@ async def get_user_by_email(email: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, email, password_hash, account_type, company_name, full_name, username, "
-        "is_active, impersonation_permission, created_at, updated_at "
+        "is_active, impersonation_permission, allowed_modules, created_at, updated_at "
         "FROM users WHERE email = $1",
         email,
     )
@@ -206,7 +219,7 @@ async def get_user_by_id(user_id: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, email, password_hash, account_type, company_name, full_name, username, "
-        "is_active, impersonation_permission, created_at, updated_at "
+        "is_active, impersonation_permission, allowed_modules, created_at, updated_at "
         "FROM users WHERE id = $1",
         user_id,
     )

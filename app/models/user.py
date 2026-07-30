@@ -3,7 +3,7 @@ User model for authentication system.
 """
 
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -38,6 +38,8 @@ class UserResponse(BaseModel):
     account_type: str
     company_name: Optional[str] = None
     created_at: datetime
+    # Module allowlist for restricted (demo) accounts; None for everyone else.
+    allowed_modules: Optional[List[str]] = None
     # Subscription and completion flags
     tier: str = "free"  # free, snapshot, blueprint, operator, enterprise
     is_subscribed: bool = False

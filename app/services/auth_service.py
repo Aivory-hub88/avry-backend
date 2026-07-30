@@ -134,6 +134,7 @@ class AuthService:
             account_type=account_type,
             company_name=user.get("company_name"),
             created_at=created or _now(),
+            allowed_modules=user.get("allowed_modules"),
             **tier_info,
         )
 
