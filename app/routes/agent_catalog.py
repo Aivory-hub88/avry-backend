@@ -40,9 +40,18 @@ async def create_item(body: AgentCatalogIn, payload: dict = Depends(require_admi
     return await pg.insert_agent_catalog(data)
 
 
+_UPDATABLE_FIELDS = {"name", "description", "category", "icon", "tags", "status", "config"}
+
+
 @router.put("/{aid}")
-async def update_item(aid: str, body: AgentCatalogIn, payload: dict = Depends(require_admin)):
-    updated = await pg.update_agent_catalog(aid, body.model_dump(exclude_unset=True))
+async def update_item(aid: str, body: dict, payload: dict = Depends(require_admin)):
+    """
+    Partial update — only keys present in the body are changed (e.g. the
+    admin dashboard's Publish/Unpublish toggle sends just `{"status": ...}`,
+    not the full agent). Unknown keys are ignored rather than rejected.
+    """
+    data = {k: v for k, v in body.items() if k in _UPDATABLE_FIELDS}
+    updated = await pg.update_agent_catalog(aid, data)
     if not updated:
         raise HTTPException(status_code=404, detail="Agent not found")
     return updated

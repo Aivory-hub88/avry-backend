@@ -210,6 +210,19 @@ CREATE TABLE IF NOT EXISTS agent_catalog (
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_catalog_status ON agent_catalog(status);
+
+-- Seed the 5 prebuilt deployable agents (id = agent_type, matches
+-- product.agent_profiles.agent_type and AGENT_TYPES in
+-- app/routes/agent_profiles.py) so they're real, admin-visible catalog rows
+-- instead of only existing as hardcoded cards in the user dashboard.
+-- ON CONFLICT DO NOTHING — never overwrites an admin's later edits to these.
+INSERT INTO agent_catalog (id, name, description, category, tags, status, config, created_by) VALUES
+  ('autonomous', 'Autonomous Agent', 'Deploy autonomous agents inside your communication hubs. They triage, respond, and update your CRM 24/7.', 'built-in', ARRAY['Web search','Leads & tickets','Invoices','Workflows','Integrations'], 'published', '{}'::jsonb, 'system'),
+  ('customer_service', 'Customer Service Agent', 'Handle inbound support 24/7. Automatically triage, resolve, and escalate to a human if necessary.', 'built-in', ARRAY['Support tickets','Human handoff','Web search','SLA workflows'], 'published', '{}'::jsonb, 'system'),
+  ('leads_qualifier', 'Leads Qualifier Agent', 'Filter inbound leads using the BANT framework. Qualified leads are automatically routed to sales.', 'built-in', ARRAY['BANT scoring','Lead capture','Sales routing','Web search'], 'published', '{}'::jsonb, 'system'),
+  ('finance_invoice_ops', 'Finance & Invoice Ops Agent', 'Automate invoice processing, anomaly detection, and multi-tier approval routing - end to end.', 'built-in', ARRAY['Invoice ledger','Anomaly flags','Approval routing','Calculator'], 'published', '{}'::jsonb, 'system'),
+  ('office_assistant', 'Office Assistant', 'Save 4 hours per week by automatically extracting action items and syncing decisions to your workspace.', 'built-in', ARRAY['Meeting summaries','Action items','Notion sync','Slack alerts','Sheets log'], 'published', '{"enterprise": true}'::jsonb, 'system')
+ON CONFLICT (id) DO NOTHING;
 """
 
 
