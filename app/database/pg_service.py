@@ -223,6 +223,36 @@ INSERT INTO agent_catalog (id, name, description, category, tags, status, config
   ('finance_invoice_ops', 'Finance & Invoice Ops Agent', 'Automate invoice processing, anomaly detection, and multi-tier approval routing - end to end.', 'built-in', ARRAY['Invoice ledger','Anomaly flags','Approval routing','Calculator'], 'published', '{}'::jsonb, 'system'),
   ('office_assistant', 'Office Assistant', 'Save 4 hours per week by automatically extracting action items and syncing decisions to your workspace.', 'built-in', ARRAY['Meeting summaries','Action items','Notion sync','Slack alerts','Sheets log'], 'published', '{"enterprise": true}'::jsonb, 'system')
 ON CONFLICT (id) DO NOTHING;
+
+-- Free assessment leads — one row per completed public assessment on
+-- aivory.uk/free-diagnostic, captured at the email gate. See
+-- app/routes/assessment_leads.py. Deliberately NOT unique on email: the same
+-- person may assess several companies, and each run is its own sales signal.
+CREATE TABLE IF NOT EXISTS assessment_leads (
+    id           TEXT PRIMARY KEY,
+    email        VARCHAR(255) NOT NULL,
+    company_name TEXT,
+    industry     TEXT,
+    company_size TEXT,
+    score        INTEGER,
+    maturity     TEXT,
+    answers      JSONB DEFAULT '{}'::jsonb,
+    strengths    TEXT[] DEFAULT '{}',
+    blockers     TEXT[] DEFAULT '{}',
+    source       TEXT DEFAULT 'free-assessment',
+    ip           VARCHAR(45),
+    user_agent   TEXT,
+    question_set_version INTEGER NOT NULL DEFAULT 1,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Additive: the CREATE above only runs on a fresh database, so existing
+-- installs need the column added explicitly. Pre-rework rows keep version 1,
+-- which is correct — they were answered against the AI-readiness question set.
+ALTER TABLE assessment_leads ADD COLUMN IF NOT EXISTS question_set_version INTEGER NOT NULL DEFAULT 1;
+
+CREATE INDEX IF NOT EXISTS idx_assessment_leads_email ON assessment_leads(email);
+CREATE INDEX IF NOT EXISTS idx_assessment_leads_created ON assessment_leads(created_at DESC);
 """
 
 
@@ -449,3 +479,71 @@ async def delete_agent_catalog(aid: str) -> bool:
     pool = await get_pool()
     result = await pool.execute("DELETE FROM agent_catalog WHERE id = $1", aid)
     return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
+# Free assessment leads
+# ---------------------------------------------------------------------------
+
+_ASSESSMENT_LEAD_COLUMNS = (
+    "id, email, company_name, industry, company_size, score, maturity, "
+    "answers, strengths, blockers, source, question_set_version, ip, "
+    "user_agent, created_at"
+)
+
+
+def _row_to_assessment_lead(row) -> dict:
+    d = dict(row)
+    if isinstance(d.get("answers"), str):
+        try:
+            d["answers"] = json.loads(d["answers"])
+        except (TypeError, ValueError):
+            d["answers"] = {}
+    if d.get("created_at") is not None:
+        d["created_at"] = d["created_at"].isoformat()
+    return d
+
+
+async def insert_assessment_lead(data: dict) -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        f"""
+        INSERT INTO assessment_leads
+            (id, email, company_name, industry, company_size, score, maturity,
+             answers, strengths, blockers, source, question_set_version, ip,
+             user_agent)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14)
+        RETURNING {_ASSESSMENT_LEAD_COLUMNS}
+        """,
+        data["id"],
+        data["email"],
+        data.get("company_name"),
+        data.get("industry"),
+        data.get("company_size"),
+        data.get("score"),
+        data.get("maturity"),
+        json.dumps(data.get("answers") or {}),
+        data.get("strengths") or [],
+        data.get("blockers") or [],
+        data.get("source") or "free-assessment",
+        data.get("question_set_version") or 1,
+        data.get("ip"),
+        data.get("user_agent"),
+    )
+    return _row_to_assessment_lead(row)
+
+
+async def list_assessment_leads(limit: int = 100, offset: int = 0) -> list:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        f"SELECT {_ASSESSMENT_LEAD_COLUMNS} FROM assessment_leads "
+        "ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        limit,
+        offset,
+    )
+    return [_row_to_assessment_lead(r) for r in rows]
+
+
+async def count_assessment_leads() -> int:
+    pool = await get_pool()
+    return await pool.fetchval("SELECT COUNT(*) FROM assessment_leads") or 0
