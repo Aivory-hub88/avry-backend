@@ -3,6 +3,7 @@ Redis Caching Utilities for Backend Service (Phase 2)
 Handles all Redis caching operations
 """
 
+import os
 import redis
 import json
 import logging
@@ -12,10 +13,19 @@ from datetime import timedelta
 
 logger = logging.getLogger(__name__)
 
-# Redis client
+# Redis client. Was hardcoded to host='localhost' with no password — silently
+# unreachable in production, where avry-backend and Redis are separate
+# containers (Redis lives in a different compose project, container name
+# `redis`, requiring a password) sharing only a Docker network. Every
+# cache_manager call was failing with a ConnectionError the whole time; every
+# caller (check_rate_limit included) happens to fail open on that, so this
+# was silent rather than a visible outage. REDIS_HOST/REDIS_PASSWORD let
+# production point at the real service; the localhost/no-password default
+# stays correct for local dev.
 redis_client = redis.Redis(
-    host='localhost',
-    port=6379,
+    host=os.getenv('REDIS_HOST', 'localhost'),
+    port=int(os.getenv('REDIS_PORT', '6379')),
+    password=os.getenv('REDIS_PASSWORD') or None,
     db=0,
     decode_responses=True
 )
