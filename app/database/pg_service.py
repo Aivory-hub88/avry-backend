@@ -253,6 +253,30 @@ ALTER TABLE assessment_leads ADD COLUMN IF NOT EXISTS question_set_version INTEG
 
 CREATE INDEX IF NOT EXISTS idx_assessment_leads_email ON assessment_leads(email);
 CREATE INDEX IF NOT EXISTS idx_assessment_leads_created ON assessment_leads(created_at DESC);
+
+-- Free assessment funnel events. assessment_leads only records the people who
+-- handed over an email, so on its own it cannot answer "how many started" or
+-- "which question do people quit on" — the questions the admin dashboard asks.
+--
+-- Deliberately carries no IP, user agent or email: a funnel needs counts, not
+-- identities. session_id is a random per-visit string generated in the browser
+-- with no link to any account, so these rows stay non-personal and need no
+-- retention policy of their own.
+CREATE TABLE IF NOT EXISTS assessment_events (
+    id           BIGSERIAL PRIMARY KEY,
+    session_id   VARCHAR(64) NOT NULL,
+    event        VARCHAR(40) NOT NULL,
+    step         INTEGER,
+    locale       VARCHAR(10),
+    industry     TEXT,
+    company_size TEXT,
+    question_set_version INTEGER NOT NULL DEFAULT 1,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_assessment_events_created ON assessment_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_assessment_events_session ON assessment_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_assessment_events_event ON assessment_events(event, created_at DESC);
 """
 
 
@@ -547,3 +571,131 @@ async def list_assessment_leads(limit: int = 100, offset: int = 0) -> list:
 async def count_assessment_leads() -> int:
     pool = await get_pool()
     return await pool.fetchval("SELECT COUNT(*) FROM assessment_leads") or 0
+
+
+
+# --- Free assessment funnel -------------------------------------------------
+#
+# Every count below is over DISTINCT session_id, not raw rows. A visitor who
+# walks back and forth through the questions emits the same step event several
+# times, and counting rows would inflate exactly the steps people struggle with
+# most — the opposite of what the drop-off view is for.
+
+
+async def insert_assessment_event(data: dict) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO assessment_events
+            (session_id, event, step, locale, industry, company_size,
+             question_set_version)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        data["session_id"],
+        data["event"],
+        data.get("step"),
+        data.get("locale"),
+        data.get("industry"),
+        data.get("company_size"),
+        data.get("question_set_version") or 1,
+    )
+
+
+async def assessment_funnel_summary(days: int = 30) -> dict:
+    """Headline counts for the window: starts, completions and leads."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT
+            COUNT(DISTINCT session_id) FILTER (WHERE event = 'start')    AS starts,
+            COUNT(DISTINCT session_id) FILTER (WHERE event = 'complete') AS completions,
+            COUNT(DISTINCT session_id) FILTER (WHERE event = 'lead')     AS lead_events
+        FROM assessment_events
+        WHERE created_at >= NOW() - ($1 || ' days')::interval
+        """,
+        str(days),
+    )
+    # Leads come from the leads table, not the event stream: the event is only a
+    # breadcrumb, while the row in assessment_leads is the thing sales acts on.
+    # They can disagree if the event beacon is blocked but the POST succeeded.
+    leads = await pool.fetchval(
+        "SELECT COUNT(*) FROM assessment_leads "
+        "WHERE created_at >= NOW() - ($1 || ' days')::interval",
+        str(days),
+    )
+    starts = row["starts"] or 0
+    completions = row["completions"] or 0
+    return {
+        "starts": starts,
+        "completions": completions,
+        "leads": leads or 0,
+        "lead_events": row["lead_events"] or 0,
+        "completion_rate": round(completions / starts * 100, 1) if starts else 0.0,
+        "lead_rate": round((leads or 0) / starts * 100, 1) if starts else 0.0,
+    }
+
+
+async def assessment_funnel_steps(days: int = 30) -> list:
+    """Reach per question, newest question set first — where people quit."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT step, COUNT(DISTINCT session_id) AS reached
+        FROM assessment_events
+        WHERE event = 'step'
+          AND step IS NOT NULL
+          AND created_at >= NOW() - ($1 || ' days')::interval
+        GROUP BY step
+        ORDER BY step
+        """,
+        str(days),
+    )
+    return [{"step": r["step"], "reached": r["reached"]} for r in rows]
+
+
+async def assessment_funnel_daily(days: int = 30) -> list:
+    """Per-day starts/completions/leads for the trend chart."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        WITH days AS (
+            SELECT generate_series(
+                date_trunc('day', NOW() - ($1 || ' days')::interval),
+                date_trunc('day', NOW()),
+                '1 day'
+            )::date AS day
+        ),
+        ev AS (
+            SELECT date_trunc('day', created_at)::date AS day,
+                   COUNT(DISTINCT session_id) FILTER (WHERE event = 'start')    AS starts,
+                   COUNT(DISTINCT session_id) FILTER (WHERE event = 'complete') AS completions
+            FROM assessment_events
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY 1
+        ),
+        ld AS (
+            SELECT date_trunc('day', created_at)::date AS day, COUNT(*) AS leads
+            FROM assessment_leads
+            WHERE created_at >= NOW() - ($1 || ' days')::interval
+            GROUP BY 1
+        )
+        SELECT days.day,
+               COALESCE(ev.starts, 0)      AS starts,
+               COALESCE(ev.completions, 0) AS completions,
+               COALESCE(ld.leads, 0)       AS leads
+        FROM days
+        LEFT JOIN ev ON ev.day = days.day
+        LEFT JOIN ld ON ld.day = days.day
+        ORDER BY days.day
+        """,
+        str(days),
+    )
+    return [
+        {
+            "day": r["day"].isoformat(),
+            "starts": r["starts"],
+            "completions": r["completions"],
+            "leads": r["leads"],
+        }
+        for r in rows
+    ]

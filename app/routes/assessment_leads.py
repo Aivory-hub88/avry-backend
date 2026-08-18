@@ -127,3 +127,74 @@ async def list_assessment_leads(
         "total": len(records),
         "storage": "file",
     }
+
+
+# ---------------------------------------------------------------------------
+# Funnel events
+#
+# assessment_leads answers "who converted". These answer "how many started, and
+# where did everyone else go" — which is the question the admin dashboard opens
+# with. GA4 already fires the same names client-side, but ad blockers eat a
+# large share of those hits and the data lands in GA rather than in our own
+# dashboard, so the funnel is recorded server-side too.
+# ---------------------------------------------------------------------------
+
+ALLOWED_EVENTS = {"start", "step", "complete", "lead"}
+
+
+class AssessmentEventRequest(BaseModel):
+    sessionId: str = Field(min_length=8, max_length=64)
+    event: str = Field(max_length=40)
+    step: Optional[int] = Field(default=None, ge=0, le=99)
+    locale: Optional[str] = Field(default=None, max_length=10)
+    industry: Optional[str] = Field(default=None, max_length=100)
+    companySize: Optional[str] = Field(default=None, max_length=50)
+    questionSetVersion: int = Field(default=1, ge=1, le=99)
+
+
+@router.post("/events/internal", dependencies=[Depends(require_internal_lead_token)])
+async def record_assessment_event(body: AssessmentEventRequest):
+    """Record one funnel breadcrumb from the public assessment."""
+    if body.event not in ALLOWED_EVENTS:
+        raise HTTPException(status_code=400, detail="Unknown event")
+
+    if not (pg and await pg.is_available()):
+        # Analytics, not a lead. If the database is unavailable we drop the
+        # breadcrumb rather than falling back to the file store — the funnel
+        # tolerates a gap, and the visitor must never wait on it.
+        return {"ok": False, "storage": "unavailable"}
+
+    try:
+        await pg.insert_assessment_event({
+            "session_id": body.sessionId,
+            "event": body.event,
+            "step": body.step,
+            "locale": body.locale,
+            "industry": body.industry,
+            "company_size": body.companySize,
+            "question_set_version": body.questionSetVersion,
+        })
+    except Exception as e:
+        logger.error(f"[!] assessment event insert failed: {e}")
+        return {"ok": False, "storage": "error"}
+
+    return {"ok": True}
+
+
+@router.get("/stats")
+async def assessment_stats(
+    days: int = 30,
+    admin: dict = Depends(require_admin),
+):
+    """Funnel summary, per-question drop-off and daily trend for the dashboard."""
+    days = max(1, min(days, 365))
+
+    if not (pg and await pg.is_available()):
+        raise HTTPException(status_code=503, detail="Statistics require Postgres")
+
+    return {
+        "days": days,
+        "summary": await pg.assessment_funnel_summary(days),
+        "steps": await pg.assessment_funnel_steps(days),
+        "daily": await pg.assessment_funnel_daily(days),
+    }
