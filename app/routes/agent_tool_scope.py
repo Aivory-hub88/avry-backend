@@ -44,10 +44,13 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # docs/CERVEAU-STATUS.md §4 patch 0024). Stripe is retired (2026-08-08
 # product direction), not listed. Update this alongside any future
 # Composio-sourced toolkit wiring in Cerveau's config.toml.
+# ERPNext added 2026-08-22 (docs/CERVEAU-ERP-INTEGRATION-PLAN.md): tenant-
+# supplied Frappe API key; all ERP writes gate behind F-1 pending approvals.
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
     "leads_qualifier": ["hubspot", "slack"],
-    "office_assistant": ["slack", "asana"],
+    "office_assistant": ["slack", "asana", "erpnext"],
+    "finance_invoice_ops": ["erpnext"],
 }
 
 _SCHEMA_SQL = """
