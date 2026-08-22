@@ -51,6 +51,9 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "leads_qualifier": ["hubspot", "slack"],
     "office_assistant": ["slack", "asana", "erpnext"],
     "finance_invoice_ops": ["erpnext"],
+    # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
+    # .autonomous] in Cerveau's config, which grants the union).
+    "autonomous": ["zendesk", "hubspot", "slack", "asana", "erpnext"],
 }
 
 _SCHEMA_SQL = """
