@@ -108,6 +108,13 @@ except Exception as e:
     print(f"[!] Agent tool scope routes failed: {e}")
 
 try:
+    from app.routes.agent_approvals import router as agent_approvals_router
+    app.include_router(agent_approvals_router)
+    print("[OK] Agent approvals routes registered")
+except Exception as e:
+    print(f"[!] Agent approvals routes failed: {e}")
+
+try:
     from app.routes.credits import router as credits_router
     app.include_router(credits_router)
     print("[OK] Credits routes registered")
