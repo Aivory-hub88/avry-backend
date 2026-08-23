@@ -46,14 +46,21 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # Composio-sourced toolkit wiring in Cerveau's config.toml.
 # ERPNext added 2026-08-22 (docs/CERVEAU-ERP-INTEGRATION-PLAN.md): tenant-
 # supplied Frappe API key; all ERP writes gate behind F-1 pending approvals.
+# Gmail/Google Calendar/Trello/Linear added 2026-08-23
+# (docs/CERVEAU-TOOLKIT-EXPANSION-PLAN.md): closes the blueprintPlanner
+# Email/Calendar default gaps + ADR-007's Product-tracking open decision
+# (both Trello and Linear wired, not one).
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
-    "leads_qualifier": ["hubspot", "slack"],
-    "office_assistant": ["slack", "asana", "erpnext"],
-    "finance_invoice_ops": ["erpnext"],
+    "leads_qualifier": ["hubspot", "slack", "gmail"],
+    "office_assistant": ["slack", "asana", "erpnext", "gmail", "googlecalendar", "trello", "linear"],
+    "finance_invoice_ops": ["erpnext", "gmail"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
-    "autonomous": ["zendesk", "hubspot", "slack", "asana", "erpnext"],
+    "autonomous": [
+        "zendesk", "hubspot", "slack", "asana", "erpnext",
+        "gmail", "googlecalendar", "trello", "linear",
+    ],
 }
 
 _SCHEMA_SQL = """
