@@ -94,6 +94,31 @@ def is_valid_token_format(token: str) -> bool:
     return bool(_TOKEN_RE.match(token or ""))
 
 
+# Pending-approval ids are Cerveau's own `pa_<uuid4>` (39 chars) — validate
+# the shape before ever round-tripping one through a Telegram callback_data
+# payload or the approval-decision gateway call, same discipline as
+# `is_valid_token_format` above for deploy-link tokens.
+_PENDING_APPROVAL_ID_RE = re.compile(r"^pa_[A-Za-z0-9-]{1,64}$")
+
+# appr:{pending_id}:approve|deny — well under Telegram's 64-byte
+# callback_data cap even at the id's max validated length (5 + 64 + 1 + 7 = 77
+# is the theoretical worst case, but real ids are 39 chars: 5+39+1+7=52).
+def _approval_keyboard(pending_approval: Optional[dict]) -> Optional[dict]:
+    """Build a Telegram inline keyboard for a pending approval, or None."""
+    if not pending_approval or not isinstance(pending_approval, dict):
+        return None
+    pending_id = pending_approval.get("id")
+    if not pending_id or not _PENDING_APPROVAL_ID_RE.match(pending_id):
+        logger.error(f"Refusing to render approval keyboard for malformed pending_id: {pending_id!r}")
+        return None
+    return {
+        "inline_keyboard": [[
+            {"text": "✅ Approve", "callback_data": f"appr:{pending_id}:approve"},
+            {"text": "❌ Deny", "callback_data": f"appr:{pending_id}:deny"},
+        ]]
+    }
+
+
 def load_user_record(db, user_id: str) -> Optional[dict]:
     """Load a user (+ current subscription tier) — Postgres on prod, file store in dev.
 
@@ -177,14 +202,19 @@ class TelegramService:
     def _api_url(self, method: str, token: str) -> str:
         return f"{TELEGRAM_API_BASE}/bot{token}/{method}"
 
-    def send_message(self, bot: dict, chat_id: int, text: str) -> bool:
+    def send_message(
+        self, bot: dict, chat_id: int, text: str, reply_markup: Optional[dict] = None
+    ) -> bool:
         if not bot:
             logger.warning("No bot configured; dropping reply")
             return False
+        body = {"chat_id": chat_id, "text": text}
+        if reply_markup:
+            body["reply_markup"] = reply_markup
         try:
             resp = requests.post(
                 self._api_url("sendMessage", bot["token"]),
-                json={"chat_id": chat_id, "text": text},
+                json=body,
                 timeout=10,
             )
             if not resp.ok:
@@ -193,6 +223,43 @@ class TelegramService:
         except requests.RequestException as e:
             logger.error(f"sendMessage error: {e}")
             return False
+
+    def answer_callback_query(self, bot: dict, callback_query_id: str, text: str = "") -> None:
+        """Stop the button's loading spinner. Best-effort — Telegram wants
+        this within seconds of the tap, but a failure here shouldn't block
+        sending the real reply."""
+        if not bot:
+            return
+        try:
+            requests.post(
+                self._api_url("answerCallbackQuery", bot["token"]),
+                json={"callback_query_id": callback_query_id, "text": text},
+                timeout=5,
+            )
+        except requests.RequestException:
+            pass
+
+    def edit_message_reply_markup(
+        self, bot: dict, chat_id: int, message_id: int, reply_markup: Optional[dict] = None
+    ) -> None:
+        """Strip (or replace) a sent message's inline keyboard — used after
+        an approval is resolved so the buttons aren't tappable twice.
+        Best-effort: Cerveau's resolve is idempotent either way, so a
+        failure here is a UX rough edge, not a correctness problem."""
+        if not bot:
+            return
+        try:
+            requests.post(
+                self._api_url("editMessageReplyMarkup", bot["token"]),
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reply_markup": reply_markup or {"inline_keyboard": []},
+                },
+                timeout=5,
+            )
+        except requests.RequestException:
+            pass
 
     def send_typing(self, bot: dict, chat_id: int) -> None:
         """Show the 'typing…' indicator while the agent thinks (best-effort)."""
@@ -318,9 +385,14 @@ class TelegramService:
 
     def process_update(self, update: dict, bot: dict) -> None:
         """Handle one Bot API update, in the context of the bot that received it."""
+        callback_query = update.get("callback_query")
+        if callback_query:
+            self._handle_callback(callback_query, bot)
+            return
+
         message = update.get("message") or update.get("channel_post")
         if not message:
-            return  # ignore edits, callbacks, member updates for now
+            return  # ignore edits, member updates for now
 
         chat = message.get("chat") or {}
         chat_id = chat.get("id")
@@ -421,6 +493,102 @@ class TelegramService:
         else:
             self.send_message(bot, chat_id, "No agent is connected to this chat.")
 
+    # ========================================================================
+    # APPROVE/DENY BUTTON TAPS (Cerveau F-1-for-approvals, Part B)
+    # ========================================================================
+
+    def _handle_callback(self, callback_query: dict, bot: dict) -> None:
+        callback_id = callback_query.get("id")
+        data = callback_query.get("data") or ""
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+
+        # Telegram wants this within seconds regardless of how long the real
+        # work below takes — stops the button's loading spinner immediately.
+        # Real feedback (the continuation reply) arrives as a follow-up
+        # sendMessage, same pattern as a normal text turn's send_typing.
+        if callback_id:
+            self.answer_callback_query(bot, callback_id)
+
+        if chat_id is None:
+            return
+
+        parts = data.split(":")
+        if len(parts) != 3 or parts[0] != "appr" or parts[2] not in ("approve", "deny"):
+            logger.error(f"Malformed approval callback_data: {data!r}")
+            return
+        _, pending_id, decision = parts
+        if not _PENDING_APPROVAL_ID_RE.match(pending_id):
+            logger.error(f"Malformed pending_id in callback_data: {pending_id!r}")
+            return
+
+        binding = self.get_binding(bot, chat_id)
+        if not binding:
+            return  # unbound chat somehow tapped a stale button; nothing to resolve as
+
+        user = self._load_user(binding["user_id"])
+        if not self._is_active(user):
+            self.send_message(bot, chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
+            return
+
+        result = self._resolve_approval(binding, pending_id, decision)
+        self.send_message(bot, chat_id, result["reply"])
+
+        # Only strip the buttons once the row has actually moved out of
+        # "pending" — on a credit-exhaustion reply or a transient gateway
+        # error, the row is untouched, so leaving them tappable lets the
+        # user retry instead of stranding the approval with no affordance.
+        if result.get("outcome") and message_id is not None:
+            self.edit_message_reply_markup(bot, chat_id, message_id)
+
+    def _resolve_approval(self, binding: dict, pending_id: str, decision: str) -> dict:
+        """Forward an approve/deny tap to the agent gateway.
+
+        Returns {"reply": str, "outcome": str | None} — outcome is None on
+        credit exhaustion or a gateway error (nothing was actually resolved).
+        """
+        if not settings.telegram_agent_gateway_url:
+            return {"reply": FALLBACK_REPLY, "outcome": None}
+        headers = {}
+        gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
+        if gateway_token:
+            headers["X-Internal-Token"] = gateway_token
+        try:
+            resp = requests.post(
+                f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/approval-decision",
+                headers=headers,
+                json={
+                    "user_id": binding["user_id"],
+                    "agent_type": binding["agent_type"],
+                    "session_id": binding.get("binding_id") or str(binding["chat_id"]),
+                    "pending_id": pending_id,
+                    "decision": decision,
+                },
+                # Same headroom reasoning as _route_to_agent — a continuation
+                # turn is a real LLM call, same latency class as a normal one.
+                timeout=195,
+            )
+            if resp.ok:
+                data = resp.json()
+                return {
+                    "reply": (data.get("reply_text") or "Done.")[:4096],
+                    "outcome": data.get("outcome"),
+                }
+            if resp.status_code == 404:
+                return {
+                    "reply": "⚠️ This approval request could no longer be found — it may have already expired or been resolved.",
+                    "outcome": None,
+                }
+            logger.error(f"Approval-decision gateway returned {resp.status_code}: {resp.text[:200]}")
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"Approval-decision gateway error: {e}")
+        return {
+            "reply": "⚠️ Couldn't process that right now. Please try tapping the button again in a moment.",
+            "outcome": None,
+        }
+
     def _handle_message(self, chat_id: int, message: dict, bot: dict) -> None:
         binding = self.get_binding(bot, chat_id)
         if not binding:
@@ -438,8 +606,9 @@ class TelegramService:
         prompt = self._build_prompt(bot, message)
         if not prompt:
             return  # nothing readable (e.g. unsupported file with no caption)
-        reply = self._route_to_agent(binding, prompt)
-        self.send_message(bot, chat_id, reply)
+        result = self._route_to_agent(binding, prompt)
+        reply_markup = _approval_keyboard(result.get("pending_approval"))
+        self.send_message(bot, chat_id, result["reply"], reply_markup=reply_markup)
 
     # ------------------------------------------------------------------
     # Attachment handling
@@ -497,10 +666,16 @@ class TelegramService:
 
         return ax.compose_prompt(caption, attachments)
 
-    def _route_to_agent(self, binding: dict, text: str, channel: str = "telegram") -> str:
-        """Forward the composed prompt to the agent gateway, if configured."""
+    def _route_to_agent(self, binding: dict, text: str, channel: str = "telegram") -> dict:
+        """Forward the composed prompt to the agent gateway, if configured.
+
+        Returns {"reply": str, "pending_approval": dict | None} — the second
+        key is additive (Cerveau patch 0035 relayed through the bridge) and
+        only ever non-null for engine='cerveau' tenants; callers that don't
+        care (e.g. the console) can just read ["reply"].
+        """
         if not settings.telegram_agent_gateway_url:
-            return FALLBACK_REPLY
+            return {"reply": FALLBACK_REPLY, "pending_approval": None}
         headers = {}
         gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
         if gateway_token:
@@ -519,14 +694,25 @@ class TelegramService:
                     "text": text,
                     "channel": channel,
                 },
-                timeout=90,
+                # 195s: headroom over the bridge's own 185s Cerveau call
+                # (Phase 6.1, itself 5s over Cerveau's 180s wall-clock cap) —
+                # was 90s, too short for a Cerveau-routed tenant's
+                # tool-calling loop to ever finish before this gave up.
+                timeout=195,
             )
             if resp.ok:
-                return (resp.json().get("reply") or FALLBACK_REPLY)[:4096]
+                data = resp.json()
+                return {
+                    "reply": (data.get("reply") or FALLBACK_REPLY)[:4096],
+                    "pending_approval": data.get("pending_approval"),
+                }
             logger.error(f"Agent gateway returned {resp.status_code}: {resp.text[:200]}")
         except (requests.RequestException, ValueError) as e:
             logger.error(f"Agent gateway error: {e}")
-        return "⚠️ The agent is temporarily unavailable. Please try again in a moment."
+        return {
+            "reply": "⚠️ The agent is temporarily unavailable. Please try again in a moment.",
+            "pending_approval": None,
+        }
 
     def route_console_message(
         self, user: dict, agent_type: str, text: str, conversation_id: Optional[str] = None
@@ -534,7 +720,10 @@ class TelegramService:
         """Talk to a deployable agent from the dashboard AI Console.
 
         No chat binding involved — the console session id keeps agent history
-        separate from any Telegram/Slack chats of the same agent.
+        separate from any Telegram/Slack chats of the same agent. Console has
+        no button UI (Part B is Telegram-only this round), so only the reply
+        text is returned; a pending approval still blocks the tool exactly as
+        it would on Telegram, the model just has no way to resolve it here.
         """
         pseudo_binding = {
             "user_id": user["user_id"],
@@ -543,4 +732,4 @@ class TelegramService:
             "chat_id": 0,
             "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
         }
-        return self._route_to_agent(pseudo_binding, text, channel="console")
+        return self._route_to_agent(pseudo_binding, text, channel="console")["reply"]
