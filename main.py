@@ -115,6 +115,20 @@ except Exception as e:
     print(f"[!] Agent approvals routes failed: {e}")
 
 try:
+    from app.routes.agent_api_keys import router as agent_api_keys_router
+    app.include_router(agent_api_keys_router)
+    print("[OK] Agent API key routes registered")
+except Exception as e:
+    print(f"[!] Agent API key routes failed: {e}")
+
+try:
+    from app.routes.tenant_mcp_servers import router as tenant_mcp_servers_router
+    app.include_router(tenant_mcp_servers_router)
+    print("[OK] Tenant custom MCP server routes registered")
+except Exception as e:
+    print(f"[!] Tenant custom MCP server routes failed: {e}")
+
+try:
     from app.routes.credits import router as credits_router
     app.include_router(credits_router)
     print("[OK] Credits routes registered")
