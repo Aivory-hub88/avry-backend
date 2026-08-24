@@ -129,6 +129,27 @@ except Exception as e:
     print(f"[!] Tenant custom MCP server routes failed: {e}")
 
 try:
+    from app.routes.telegram import router as telegram_router
+    app.include_router(telegram_router)
+    print("[OK] Telegram routes registered")
+except Exception as e:
+    print(f"[!] Telegram routes failed: {e}")
+
+try:
+    from app.routes.discord import router as discord_router
+    app.include_router(discord_router)
+    print("[OK] Discord routes registered")
+except Exception as e:
+    print(f"[!] Discord routes failed: {e}")
+
+try:
+    from app.routes.slack import router as slack_router
+    app.include_router(slack_router)
+    print("[OK] Slack routes registered")
+except Exception as e:
+    print(f"[!] Slack routes failed: {e}")
+
+try:
     from app.routes.credits import router as credits_router
     app.include_router(credits_router)
     print("[OK] Credits routes registered")
