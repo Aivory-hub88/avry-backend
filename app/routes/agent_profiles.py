@@ -20,6 +20,13 @@ Dashboard-facing (JWT auth):
 
 Internal (bridge-facing, X-Internal-Token):
     GET /api/v1/agent-profiles/internal/{user_id}/{agent_type}
+
+The internal response also carries `engine` ('legacy' | 'cerveau') — the
+Phase 6.1 per-tenant rollout flag for whether the bridge should route this
+tenant's messages to Aivory Cerveau instead of the legacy agent loop. It is
+deliberately NOT exposed on the dashboard-facing GET/PUT/DELETE routes above:
+there is no UI for it yet, and an operator's own JWT should never be able to
+read or flip which engine serves them.
 """
 
 import logging
@@ -63,9 +70,18 @@ CREATE TABLE IF NOT EXISTS product.agent_profiles (
     knowledge            TEXT,
     custom_instructions  TEXT,
     greeting             TEXT,
+    engine               TEXT NOT NULL DEFAULT 'legacy',
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, agent_type)
 );
+"""
+
+# CREATE TABLE IF NOT EXISTS above only helps a fresh install — the table
+# already exists in production, so the new column needs its own additive
+# migration (same idiom as pg_service.py's ADD COLUMN IF NOT EXISTS calls).
+_ALTER_SQL = """
+ALTER TABLE product.agent_profiles
+    ADD COLUMN IF NOT EXISTS engine TEXT NOT NULL DEFAULT 'legacy';
 """
 
 _schema_ready = False
@@ -97,6 +113,7 @@ def _ensure_schema(conn) -> None:
         return
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_SQL)
+        cur.execute(_ALTER_SQL)
     conn.commit()
     _schema_ready = True
 
@@ -106,9 +123,13 @@ _COLUMNS = [
     "business_description", "knowledge", "custom_instructions", "greeting",
 ]
 
+# Internal-only superset — adds `engine`, the Phase 6.1 rollout flag. Never
+# used by the dashboard-facing routes below.
+_INTERNAL_COLUMNS = _COLUMNS + ["engine"]
 
-def _row_to_profile(row) -> dict:
-    profile = dict(zip(_COLUMNS, row[:-1]))
+
+def _row_to_profile(row, columns=_COLUMNS) -> dict:
+    profile = dict(zip(columns, row[:-1]))
     profile["updated_at"] = row[-1].isoformat() if row[-1] else None
     return profile
 
@@ -125,6 +146,24 @@ def load_profile(user_id: str, agent_type: str) -> Optional[dict]:
             )
             row = cur.fetchone()
         return _row_to_profile(row) if row else None
+    finally:
+        conn.close()
+
+
+def load_profile_internal(user_id: str, agent_type: str) -> Optional[dict]:
+    """Same as load_profile(), plus `engine`. Bridge-facing only — see the
+    module docstring for why this stays off the dashboard-facing routes."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {', '.join(_INTERNAL_COLUMNS)}, updated_at FROM product.agent_profiles"
+                " WHERE user_id = %s AND agent_type = %s",
+                (user_id, agent_type),
+            )
+            row = cur.fetchone()
+        return _row_to_profile(row, _INTERNAL_COLUMNS) if row else None
     finally:
         conn.close()
 
@@ -149,7 +188,7 @@ def _check_agent_type(agent_type: str) -> None:
 def internal_get(user_id: str, agent_type: str):
     _check_agent_type(agent_type)
     try:
-        profile = load_profile(user_id, agent_type)
+        profile = load_profile_internal(user_id, agent_type)
     except Exception as e:
         logger.error(f"profile lookup failed for {user_id}/{agent_type}: {e}")
         raise HTTPException(status_code=503, detail="Profile store unavailable")
