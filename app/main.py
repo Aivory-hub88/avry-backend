@@ -4,7 +4,6 @@ Authentication, Authorization, and Tier Management
 Port: 8081
 """
 
-import asyncio
 import os
 import sys
 from pathlib import Path
@@ -114,25 +113,6 @@ except Exception as e:
     print(f"[!] Warning: Could not import assessment leads routes: {e}")
     assessment_leads_router = None
 
-# Reads/writes identity.user_tiers — avry-payments calls
-# POST /api/v1/entitlements/internal/grant after every settled purchase, but
-# this router was never registered, so no real purchase has ever actually
-# landed an entitlement. Registering it is required for Policy B (subscription
-# lapse) to ever have real data to act on.
-try:
-    from app.routes.entitlements import router as entitlements_router
-    print("[✓] Entitlements routes registered")
-except Exception as e:
-    print(f"[!] Warning: Could not import entitlements routes: {e}")
-    entitlements_router = None
-
-try:
-    from app.services import account_cleanup
-    print("[✓] Account-cleanup service imported")
-except Exception as e:
-    print(f"[!] Warning: Could not import account-cleanup service: {e}")
-    account_cleanup = None
-
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -169,19 +149,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] Warning: Could not start event consumer: {e}")
 
-    # Start account-cleanup poller (see app/services/account_cleanup.py).
-    # Runs regardless of ACCOUNT_CLEANUP_ENABLED — disabled just means it logs
-    # candidates instead of acting on them.
-    cleanup_task = None
-    if account_cleanup and _PG_MODULE:
-        cleanup_task = asyncio.create_task(account_cleanup.run_poller())
-
     yield
 
     print(f"[{datetime.now().isoformat()}] [SHUTDOWN] AVRY-Backend service shutting down...")
-
-    if cleanup_task:
-        cleanup_task.cancel()
 
     # Close PostgreSQL pool
     if _PG_MODULE:
@@ -301,8 +271,6 @@ if trap_hits_router:
     app.include_router(trap_hits_router)
 if assessment_leads_router:
     app.include_router(assessment_leads_router)
-if entitlements_router:
-    app.include_router(entitlements_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")

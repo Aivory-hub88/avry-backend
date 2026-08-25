@@ -2,6 +2,7 @@
 avry-backend Microservice Entry Point
 Authentication, user management, JWT — PostgreSQL-backed
 """
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -28,8 +29,23 @@ async def lifespan(app: FastAPI):
     print("[STARTUP] avry-backend starting...")
     if _PG:
         await pg.init_pool()
+
+    # Account-cleanup poller (see app/services/account_cleanup.py). Runs
+    # regardless of ACCOUNT_CLEANUP_ENABLED — disabled just means it logs
+    # candidates instead of acting on them.
+    cleanup_task = None
+    if _PG:
+        try:
+            from app.services import account_cleanup
+            cleanup_task = asyncio.create_task(account_cleanup.run_poller())
+            print("[OK] Account-cleanup poller started")
+        except Exception as e:
+            print(f"[!] Account-cleanup poller failed to start: {e}")
+
     yield
     print("[SHUTDOWN] avry-backend stopping...")
+    if cleanup_task:
+        cleanup_task.cancel()
     if _PG:
         await pg.close_pool()
 
@@ -169,6 +185,18 @@ try:
     print("[OK] Admin users routes registered")
 except Exception as e:
     print(f"[!] Warning: Could not import admin users routes: {e}")
+
+# Reads/writes identity.user_tiers — avry-payments calls
+# POST /api/v1/entitlements/internal/grant after every settled purchase, but
+# this router was never registered here, so no real purchase has ever
+# actually landed an entitlement. Required for Policy B (subscription lapse,
+# app/services/account_cleanup.py) to ever have real data to act on.
+try:
+    from app.routes.entitlements import router as entitlements_router
+    app.include_router(entitlements_router)
+    print("[OK] Entitlements routes registered")
+except Exception as e:
+    print(f"[!] Entitlements routes failed: {e}")
 
 # Impersonation middleware
 try:
