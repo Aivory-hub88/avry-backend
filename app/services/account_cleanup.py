@@ -163,6 +163,7 @@ async def _policy_b_warn_candidates(pool) -> list:
           AND t.expires_at <= now()
           AND t.lapse_warned_at IS NULL
           AND u.is_active = true
+          AND u.account_type NOT IN ('admin', 'superadmin', 'demo')
         """
     )
 
@@ -176,6 +177,7 @@ async def _policy_b_delete_candidates(pool) -> list:
         WHERE t.expires_at IS NOT NULL
           AND t.expires_at <= now() - make_interval(days => {POLICY_B_GRACE_DAYS})
           AND u.is_active = true
+          AND u.account_type NOT IN ('admin', 'superadmin', 'demo')
         """
     )
 
