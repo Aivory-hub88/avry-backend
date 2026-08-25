@@ -277,6 +277,54 @@ CREATE TABLE IF NOT EXISTS assessment_events (
 CREATE INDEX IF NOT EXISTS idx_assessment_events_created ON assessment_events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_assessment_events_session ON assessment_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_assessment_events_event ON assessment_events(event, created_at DESC);
+
+-- Account cleanup (app/services/account_cleanup.py): tracks the one-time
+-- warning email sent before a never-purchased signup is hard-deleted at 32h.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='users' AND column_name='cleanup_warned_at'
+    ) THEN
+        ALTER TABLE users ADD COLUMN cleanup_warned_at TIMESTAMPTZ;
+    END IF;
+END $$;
+
+-- user_tiers is written by app/services/entitlements.py (grant_entitlement())
+-- and read by app/services/entitlement_state.py, but neither file is a
+-- migration — declaring its shape here too so a fresh install has it, and so
+-- the lapse_warned_at ALTER below is always safe to run. A no-op wherever the
+-- table already exists (matches the live column types).
+CREATE TABLE IF NOT EXISTS user_tiers (
+    user_id    TEXT PRIMARY KEY,
+    tier       TEXT,
+    features   JSONB DEFAULT '[]'::jsonb,
+    expires_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name='user_tiers' AND column_name='lapse_warned_at'
+    ) THEN
+        ALTER TABLE user_tiers ADD COLUMN lapse_warned_at TIMESTAMPTZ;
+    END IF;
+END $$;
+
+-- Forensic record of hard-deleted accounts. The live `users` row, its
+-- sessions and password hash are gone after a hard delete; this is the only
+-- remaining answer to "did we really delete this person, and when" if it's
+-- ever disputed.
+CREATE TABLE IF NOT EXISTS deleted_users_archive (
+    id           TEXT PRIMARY KEY,
+    email        VARCHAR(255) NOT NULL,
+    account_type VARCHAR(50),
+    created_at   TIMESTAMPTZ,
+    deleted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    reason       TEXT NOT NULL
+);
 """
 
 

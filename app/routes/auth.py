@@ -10,7 +10,7 @@ from app.models.user import (
     UserCreate, UserLogin, UserResponse, 
     TokenPair, TokenRefreshRequest, AuthResponse
 )
-from app.services.auth_service import AuthService
+from app.services.auth_service import AuthService, PaymentRequiredError
 from app.database.db_service import DatabaseService
 from app.utils.cache import cache_user, get_cached_user
 
@@ -120,7 +120,14 @@ async def login(credentials: UserLogin, request: Request):
         
         logger.info(f"User logged in successfully: {result.user.user_id}")
         return result
-        
+
+    except PaymentRequiredError as e:
+        logger.info(f"Login blocked (payment required) for {credentials.email}, deadline {e.deadline_at.isoformat()}")
+        raise HTTPException(
+            status_code=402,
+            detail={"error": "payment_required", "deadline_at": e.deadline_at.isoformat()},
+        )
+
     except ValueError as e:
         # Publish login failure event
         if event_publisher:

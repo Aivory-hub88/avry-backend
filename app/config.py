@@ -59,7 +59,28 @@ class Settings(BaseSettings):
     slack_signing_secret: Optional[str] = None
     # Where the OAuth callback sends the user after a successful install
     slack_post_install_redirect: str = "https://aivory.id/dashboard/agents?slack=connected"
-    
+
+    # Outbound account/security mail (password reset, account-cleanup warnings).
+    # The container has always received these via docker-compose, but they were
+    # never declared here — app/services/email_service.py's settings.smtp_host
+    # raised AttributeError on every send, so password-reset mail has been
+    # silently broken since it shipped.
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_from_email: Optional[str] = None
+    auth_from_email: Optional[str] = None
+    password_reset_url_base: str = "https://aivory.uk/reset-password"
+    admin_password_reset_url_base: str = "https://admin.aivory.id/admin/reset-password"
+    password_reset_ttl_minutes: int = 60
+
+    # Account cleanup (see app/services/account_cleanup.py). Off by default —
+    # the poller still runs and logs what it would warn/delete, but sends no
+    # mail and deletes nothing until this is explicitly turned on.
+    account_cleanup_enabled: bool = False
+    account_cleanup_interval_seconds: int = 1800
+
     # CORS configuration
     cors_origins: list[str] = ["*"]
     

@@ -36,6 +36,17 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class PaymentRequiredError(Exception):
+    """
+    Raised by login() when the account is inside Policy A's 32h no-purchase
+    window (see app/services/account_cleanup.py). Carries the purchase
+    deadline so the route layer can return it to the frontend.
+    """
+    def __init__(self, deadline_at: datetime):
+        self.deadline_at = deadline_at
+        super().__init__("payment_required")
+
+
 class AuthService:
     """Handles authentication, user management, and JWT tokens."""
 
@@ -251,6 +262,20 @@ class AuthService:
 
         if not self.verify_password(credentials.password, user["password_hash"]):
             raise ValueError("Invalid email or password")
+
+        # ── Policy A gate: block login while the account is inside its 32h
+        # no-purchase window (see app/services/account_cleanup.py). Only
+        # meaningful when Postgres is up — the JSON fallback store has no
+        # payment_orders to check against, so no gate applies there.
+        user_id_for_gate = user.get("user_id") or user.get("id")
+        if pg_up:
+            try:
+                from app.services import account_cleanup
+                deadline = await account_cleanup.check_payment_required(user_id_for_gate)
+            except Exception:
+                deadline = None
+            if deadline is not None:
+                raise PaymentRequiredError(deadline)
 
         # ── Session & tokens ──────────────────────────────────────────────────
         user_id       = user.get("user_id") or user.get("id")
