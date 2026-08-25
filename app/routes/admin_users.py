@@ -16,6 +16,7 @@ import bcrypt
 from fastapi import APIRouter, HTTPException, Header, Query
 
 from app.database import pg_service as pg
+from app.services import demo_data_cleanup, password_reset_service
 from app.utils.id_generator import generate_id
 
 logger = logging.getLogger(__name__)
@@ -351,6 +352,137 @@ async def reset_account_password(
     # caller-supplied secret in the response body/logs.
     if generated:
         result["password"] = new_password
+    return result
+
+
+# ── POST /api/v1/admin/admin-accounts/{id}/logout ─────────────────────────────
+
+
+@router.post("/admin-accounts/{user_id}/logout")
+async def logout_demo_account(user_id: str, authorization: Optional[str] = Header(None)):
+    """
+    Force-logout a demo account and wipe its usage data (Deep Diagnostic,
+    Blueprint, Roadmap, Workflow Copilot content). Demo accounts get handed
+    to different prospects over time; without this, the next demo call would
+    otherwise see whatever the previous one produced (see demo_data_cleanup.py).
+
+    Demo accounts only — this is a data-destructive action and every other
+    account type has a real owner who should not have their content wiped by
+    an admin click.
+    """
+    await require_admin(authorization)
+
+    pool = await pg.get_pool()
+    target = await pool.fetchrow(
+        "SELECT id, account_type FROM users WHERE id = $1", user_id
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target["account_type"] != "demo":
+        raise HTTPException(
+            status_code=400,
+            detail="Logout-and-cleanup is only available for demo accounts",
+        )
+
+    sessions_ended = await demo_data_cleanup.invalidate_sessions(user_id)
+    cleared = await demo_data_cleanup.clear_usage_data(user_id)
+
+    return {
+        "success": True,
+        "message": "Demo account logged out and usage data cleared",
+        "sessionsEnded": sessions_ended,
+        "cleared": cleared,
+    }
+
+
+# ── POST /api/v1/admin/users/{id}/reset-password ──────────────────────────────
+
+
+@router.post("/users/{user_id}/reset-password")
+async def reset_user_password(
+    user_id: str,
+    body: Optional[dict] = None,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Reset any user's password — the general counterpart of
+    /admin-accounts/{id}/reset-password above, which only ever covered
+    admin/superadmin/demo accounts. A locked-out regular customer had no path
+    at all before this.
+
+    mode:
+      - "email" (default): mail a one-time reset link, change nothing yet.
+      - "set": apply the supplied password immediately.
+      - "generate": mint a strong password server-side and return it once.
+
+    "set"/"generate" both end every active session for the account — the
+    frontend tells the admin this happens, so it must actually happen.
+    Privilege: resetting an admin/superadmin password requires superadmin.
+    `clearUsageData: true` additionally wipes the account's Deep
+    Diagnostic/Blueprint/Roadmap/Workflow content — demo accounts only.
+    """
+    payload = await require_admin(authorization)
+
+    pool = await pg.get_pool()
+    target = await pool.fetchrow(
+        "SELECT id, email, account_type, is_active FROM users WHERE id = $1", user_id
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if target["account_type"] in ("admin", "superadmin") and payload.get("account_type") != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmins can reset admin passwords")
+
+    body = body or {}
+    mode = body.get("mode") or ("set" if body.get("password") else "email")
+    if mode not in ("email", "set", "generate"):
+        raise HTTPException(status_code=400, detail="mode must be one of: email, set, generate")
+
+    clear_usage_data = bool(body.get("clearUsageData"))
+    if clear_usage_data and target["account_type"] != "demo":
+        raise HTTPException(
+            status_code=400,
+            detail="clearUsageData is only available for demo accounts",
+        )
+
+    if mode == "email":
+        sent = await password_reset_service.request_reset(target["email"])
+        # clearUsageData is independent of *when* the password actually
+        # changes (the user hasn't clicked the link yet) — an admin clearing
+        # a demo account's content wants that to happen now, not on click.
+        if clear_usage_data:
+            await demo_data_cleanup.clear_usage_data(user_id)
+        return {
+            "success": True,
+            "emailSent": sent,
+            "message": "Reset link sent" if sent else "Could not send the reset email",
+        }
+
+    new_password = body.get("password") if mode == "set" else None
+    generated_password = None
+    if mode == "set":
+        if not new_password or len(new_password) < 8:
+            raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
+    else:  # generate
+        new_password = _generate_password()
+        generated_password = new_password
+
+    password_hash = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt(12)).decode()
+    await pool.execute(
+        "UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        password_hash, user_id,
+    )
+    # An older emailed reset link must not be able to undo this, and every
+    # session logged in under the old password must end.
+    await password_reset_service.invalidate_all(user_id)
+    await demo_data_cleanup.invalidate_sessions(user_id)
+
+    if clear_usage_data:
+        await demo_data_cleanup.clear_usage_data(user_id)
+
+    result = {"success": True, "message": "Password updated. Signed out of all sessions."}
+    if generated_password:
+        result["password"] = generated_password
     return result
 
 

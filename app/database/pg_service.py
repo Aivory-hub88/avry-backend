@@ -313,6 +313,23 @@ BEGIN
     END IF;
 END $$;
 
+-- Self-service + admin-issued password reset links
+-- (app/services/password_reset_service.py). Not created anywhere else — same
+-- situation as user_tiers above, declared here so a fresh install has it.
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash    CHAR(64) NOT NULL UNIQUE,
+    audience      VARCHAR(20) NOT NULL,
+    expires_at    TIMESTAMPTZ NOT NULL,
+    used_at       TIMESTAMPTZ,
+    requested_ip  VARCHAR(45),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens (expires_at);
+
 -- Forensic record of hard-deleted accounts. The live `users` row, its
 -- sessions and password hash are gone after a hard delete; this is the only
 -- remaining answer to "did we really delete this person, and when" if it's
@@ -619,7 +636,6 @@ async def list_assessment_leads(limit: int = 100, offset: int = 0) -> list:
 async def count_assessment_leads() -> int:
     pool = await get_pool()
     return await pool.fetchval("SELECT COUNT(*) FROM assessment_leads") or 0
-
 
 
 # --- Free assessment funnel -------------------------------------------------
