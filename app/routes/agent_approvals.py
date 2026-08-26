@@ -48,9 +48,18 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/agent-approvals", tags=["agent-approvals"])
 
 # Both HA instances share one binary but hold separate pending-stores.
+# Cerveau (zeroclaw-cerveau/-b) runs as a native systemd process on the VPS
+# host, bound to the host's own 127.0.0.1 — but this route runs inside the
+# avry-backend Docker container, where 127.0.0.1 is the container's own
+# loopback, not the host's (same class of gap fixed for n8n and Cerveau's own
+# public bind elsewhere in this project). Confirmed live: from inside the
+# container, 127.0.0.1:3100 is unreachable (connection refused) while
+# host.docker.internal:3100 returns 200 — this silently broke both listing
+# and resolving every pending approval (caught per-base, logged as a
+# warning, never surfaced) until this default was fixed 2026-08-25.
 _CERVEAU_BASES = [
-    os.getenv("CERVEAU_APPROVAL_BASE_1", "http://127.0.0.1:3100"),
-    os.getenv("CERVEAU_APPROVAL_BASE_2", "http://127.0.0.1:3101"),
+    os.getenv("CERVEAU_APPROVAL_BASE_1", "http://host.docker.internal:3100"),
+    os.getenv("CERVEAU_APPROVAL_BASE_2", "http://host.docker.internal:3101"),
 ]
 _TIMEOUT = httpx.Timeout(10.0)
 
