@@ -83,7 +83,14 @@ class Settings(BaseSettings):
 
     # CORS configuration
     cors_origins: list[str] = ["*"]
-    
+
+    # ADR-006 Part B: AES-256-GCM key for encrypting tenant custom MCP server
+    # auth-header values at rest (product.tenant_custom_mcp_servers). Its own
+    # dedicated env var — deliberately decoupled from avry-careers'
+    # ENCRYPTION_KEY (PII/CV files) and any other service's key, so rotating
+    # one never touches the other.
+    mcp_server_auth_encryption_key: Optional[str] = None
+
     def validate_paid_tier_config(self) -> None:
         """
         Validate that required configuration for paid tiers is present.
