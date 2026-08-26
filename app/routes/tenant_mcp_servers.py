@@ -185,7 +185,15 @@ def _extract_jsonrpc_body(raw: bytes) -> dict:
     return json.loads(text)
 
 
-def _mcp_jsonrpc_call(url: str, method: str, params: dict, headers: dict, request_id: int) -> dict:
+def _mcp_jsonrpc_call(url: str, method: str, params: dict, headers: dict, request_id: int) -> tuple[dict, Optional[str]]:
+    """Returns (result, session_id) — session_id is the server's
+    Mcp-Session-Id response header, if it sent one. The streamable-http
+    transport is stateful: a server that issues a session id on `initialize`
+    (the MCP spec's expected behavior, and what real servers like
+    erpipe-org/mcp-odoo do) will 400 "Missing session ID" on every later
+    call in the same handshake unless that header is echoed back — this
+    verification handshake didn't do that until 2026-08-26, so it could
+    never actually pass against a real session-issuing MCP server."""
     body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode("utf-8")
     resp = guarded_fetch(
         url,
@@ -205,7 +213,8 @@ def _mcp_jsonrpc_call(url: str, method: str, params: dict, headers: dict, reques
     if "error" in parsed and parsed["error"]:
         err = parsed["error"]
         raise GuardedFetchError(f"MCP error: {err.get('message') or err}")
-    return parsed.get("result") or {}
+    session_id = next((v for k, v in resp.headers.items() if k.lower() == "mcp-session-id"), None)
+    return parsed.get("result") or {}, session_id
 
 
 def _run_verification(url: str, auth_header_name: Optional[str], auth_header_value: Optional[str]) -> dict:
@@ -217,8 +226,10 @@ def _run_verification(url: str, auth_header_name: Optional[str], auth_header_val
     if auth_header_name and auth_header_value:
         headers[auth_header_name] = auth_header_value
 
-    _run_verification_init(url, headers)
-    result = _mcp_jsonrpc_call(url, "tools/list", {}, headers, request_id=2)
+    session_id = _run_verification_init(url, headers)
+    if session_id:
+        headers = {**headers, "Mcp-Session-Id": session_id}
+    result, _ = _mcp_jsonrpc_call(url, "tools/list", {}, headers, request_id=2)
     raw_tools = result.get("tools")
     if not isinstance(raw_tools, list):
         raise GuardedFetchError("server did not return a tools list")
@@ -231,8 +242,8 @@ def _run_verification(url: str, auth_header_name: Optional[str], auth_header_val
     return {"tools": tools}
 
 
-def _run_verification_init(url: str, headers: dict) -> None:
-    _mcp_jsonrpc_call(
+def _run_verification_init(url: str, headers: dict) -> Optional[str]:
+    _, session_id = _mcp_jsonrpc_call(
         url,
         "initialize",
         {
@@ -243,6 +254,7 @@ def _run_verification_init(url: str, headers: dict) -> None:
         headers,
         request_id=1,
     )
+    return session_id
 
 
 # ── Request/response models ─────────────────────────────────────────────
