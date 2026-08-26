@@ -96,10 +96,15 @@ def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_pay
     if tier_err:
         raise HTTPException(status_code=403, detail=tier_err)
 
-    reply = telegram_service.route_console_message(
+    result = telegram_service.route_console_message(
         record, body.agent_type, text[:8000], body.conversation_id
     )
-    return {"reply": reply, "agent_type": body.agent_type, "agent_name": AGENT_TYPES[body.agent_type]}
+    return {
+        "reply": result["reply"],
+        "agent_type": body.agent_type,
+        "agent_name": AGENT_TYPES[body.agent_type],
+        "pending_approval": result.get("pending_approval"),
+    }
 
 
 @router.get("/link-status/{token}")

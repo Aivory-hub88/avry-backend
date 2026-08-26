@@ -716,14 +716,15 @@ class TelegramService:
 
     def route_console_message(
         self, user: dict, agent_type: str, text: str, conversation_id: Optional[str] = None
-    ) -> str:
+    ) -> dict:
         """Talk to a deployable agent from the dashboard AI Console.
 
         No chat binding involved — the console session id keeps agent history
-        separate from any Telegram/Slack chats of the same agent. Console has
-        no button UI (Part B is Telegram-only this round), so only the reply
-        text is returned; a pending approval still blocks the tool exactly as
-        it would on Telegram, the model just has no way to resolve it here.
+        separate from any Telegram/Slack chats of the same agent. Returns the
+        full {"reply", "pending_approval"} dict — the console now renders its
+        own Approve/Deny buttons from `pending_approval` and resolves through
+        the existing /api/v1/agent-approvals endpoint, the same one the
+        dashboard's Approvals page uses.
         """
         pseudo_binding = {
             "user_id": user["user_id"],
@@ -732,4 +733,4 @@ class TelegramService:
             "chat_id": 0,
             "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
         }
-        return self._route_to_agent(pseudo_binding, text, channel="console")["reply"]
+        return self._route_to_agent(pseudo_binding, text, channel="console")
