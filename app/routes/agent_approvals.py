@@ -161,7 +161,15 @@ async def _resolve_on(client: httpx.AsyncClient, base: str, approval_id: str,
     )
     if res.status_code == 404:
         return None  # row not on this instance/agent_type, or not this tenant's
-    if not res.ok:
+    if res.status_code >= 400:
+        # httpx.Response has no .ok (that's a `requests` attribute) -- the
+        # original `if not res.ok` raised AttributeError on every call here,
+        # which the caller's `except Exception: continue` swallowed. Net
+        # effect: the resolve against Cerveau succeeded every time (real
+        # state change, confirmed live), but this route always reported a
+        # false "Approval not found" back to whoever called it -- the
+        # dashboard Approvals page and the console's Approve/Deny buttons
+        # included. Found and fixed 2026-08-25.
         detail = res.text[:300]
         raise HTTPException(status_code=502, detail=f"Cerveau resolve failed: {detail}")
     return res.json()
