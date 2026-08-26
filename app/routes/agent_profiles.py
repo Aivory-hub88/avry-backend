@@ -17,6 +17,10 @@ Dashboard-facing (JWT auth):
     GET /api/v1/agent-profiles/{agent_type}      -> one profile (or defaults)
     PUT /api/v1/agent-profiles/{agent_type}      -> upsert
     DELETE /api/v1/agent-profiles/{agent_type}   -> reset to default identity
+    POST /api/v1/agent-profiles/{agent_type}/knowledge/document
+        -> extract text from an uploaded document (PDF/Word/Excel/CSV/text)
+           and return it merged into the knowledge field; does not save by
+           itself -- the dashboard still calls PUT to persist it
 
 Internal (bridge-facing, X-Internal-Token):
     GET /api/v1/agent-profiles/internal/{user_id}/{agent_type}
@@ -34,10 +38,11 @@ import os
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
+from app.services import attachment_extractor
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +58,10 @@ FIELD_CAPS = {
     "tone": 200,
     "language_pref": 200,  # comma-separated list from the dashboard multi-select
     "business_description": 1500,
-    "knowledge": 4000,
+    # Matches attachment_extractor.MAX_EXTRACTED_CHARS -- the knowledge
+    # field is the one place meant to hold a whole uploaded document, not
+    # just a short FAQ, so it gets real headroom the other fields don't.
+    "knowledge": 12000,
     "custom_instructions": 1500,
     "greeting": 300,
 }
@@ -226,6 +234,54 @@ def get_profile(agent_type: str, user: dict = Depends(get_current_user_payload))
         logger.error(f"profile lookup failed: {e}")
         raise HTTPException(status_code=503, detail="Profile store unavailable")
     return {"agent_type": agent_type, "profile": profile}
+
+
+_SUPPORTED_DOCUMENT_EXTS = {".pdf", ".docx", ".xlsx", ".xlsm", ".csv", ".txt", ".md"}
+
+
+@router.post("/{agent_type}/knowledge/document")
+async def upload_knowledge_document(
+    agent_type: str,
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user_payload),
+):
+    """Extract text from an uploaded document and merge it into this agent's
+    knowledge field. Reuses the same extractor Telegram/Slack attachments go
+    through -- no new parsing logic, no new storage: the merged text is
+    returned for the dashboard to place in the Knowledge field and save via
+    the normal PUT, exactly like typing it in by hand would."""
+    _check_agent_type(agent_type)
+    filename = file.filename or "document"
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in _SUPPORTED_DOCUMENT_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Try PDF, Word (.docx), Excel (.xlsx), CSV, or plain text.",
+        )
+
+    data = await file.read()
+    extracted = attachment_extractor.extract_document_text(filename, data, file.content_type)
+    if not extracted:
+        raise HTTPException(status_code=422, detail=f"Could not extract any text from '{filename}'.")
+    if extracted.startswith("[") and extracted.endswith("]"):
+        # extractor's own placeholder for "too large" / "could not read" cases
+        raise HTTPException(status_code=422, detail=extracted[1:-1])
+
+    try:
+        current = load_profile(user["user_id"], agent_type)
+    except Exception as e:
+        logger.error(f"profile lookup failed before knowledge upload: {e}")
+        raise HTTPException(status_code=503, detail="Profile store unavailable")
+
+    existing = ((current or {}).get("knowledge") or "").strip()
+    section = f"--- From {filename} ---\n{extracted}"
+    combined = f"{existing}\n\n{section}" if existing else section
+
+    cap = FIELD_CAPS["knowledge"]
+    truncated = len(combined) > cap
+    combined = _sanitize(combined, cap) or ""
+
+    return {"knowledge": combined, "truncated": truncated, "extracted_chars": len(extracted)}
 
 
 @router.put("/{agent_type}")
