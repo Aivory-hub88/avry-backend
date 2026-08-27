@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.database.db_service import DatabaseService
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
 from app.routes.agent_profiles import AGENT_TYPES, load_profile_internal
-from app.services import mcp_server_encryption
+from app.services import mcp_server_encryption, tiers
 from app.services.guarded_fetch import GuardedFetchError, guarded_fetch
 from app.services.telegram_service import is_superadmin, load_user_record
 
@@ -64,15 +64,16 @@ router = APIRouter(prefix="/api/v1/tenant-mcp-servers", tags=["tenant-mcp-server
 _db_service = DatabaseService()
 
 # Tier ladder follows the 2026 pricing rebrand (Operational / Business /
-# Enterprise). Legacy tier names written by the old payments flow
-# (foundation / pro) are aliased onto the same rungs so existing
-# identity.user_tiers rows keep working without a data migration.
+# Enterprise). The ladder and the legacy-name aliases now live in
+# app/services/tiers.py rather than being re-declared per route.
+#
+# `operational` is the first paid rung. An account with no live plan resolves
+# to `tiers.FREE_TIER`, which ranks below it, so this gate now rejects
+# non-paying and lapsed callers. It previously admitted everyone: the old
+# ladder gave unknown tiers rung 0, the same rung as `operational`, and
+# load_user_record resolved a missing or lapsed entitlement to the base PAID
+# tier.
 _MIN_TIER = "operational"
-_TIER_ORDER = {
-    "operational": 0, "foundation": 0,   # legacy alias
-    "business": 1, "pro": 1,             # legacy alias
-    "enterprise": 2,
-}
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,40}$")
 _MAX_ERROR_LEN = 500
@@ -150,8 +151,8 @@ def _require_pro_or_above(user_id: str) -> None:
     record = load_user_record(_db_service, user_id) or {"user_id": user_id}
     if is_superadmin(record):
         return
-    tier = str(record.get("tier") or "operational").lower()
-    if _TIER_ORDER.get(tier, 0) < _TIER_ORDER[_MIN_TIER]:
+    tier = tiers.account_tier(record.get("tier"))
+    if not tiers.meets(tier, _MIN_TIER):
         raise HTTPException(
             status_code=403,
             detail="Custom MCP servers are available on paid plans (Operational, Business, or Enterprise). Upgrade to register one.",

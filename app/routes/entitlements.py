@@ -14,9 +14,9 @@ insert happens in the same transaction as the effect, so a crash rolls back both
 
 Product -> effect, following the pricing page and credit_service.TIER_ALLOWANCES:
 
-    foundation    -> tier 'foundation'  (80 credits/mo)
-    acceleration  -> tier 'pro'         (220 credits/mo)
-    intelligence  -> tier 'enterprise'  (3000 credits/mo)
+    operational   -> tier 'operational' (80 credits/mo)
+    business      -> tier 'business'    (220 credits/mo)
+    enterprise    -> tier 'enterprise'  (3000 credits/mo)
     ai_snapshot   -> feature 'snapshot'
     ai_blueprint  -> feature 'blueprint'
     ai_fullstack  -> features 'snapshot' + 'blueprint'
@@ -39,13 +39,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/entitlements", tags=["entitlements"])
 
 # Subscription products -> the tier stored in identity.user_tiers.
+#
+# Product id and stored tier are now the SAME canonical string (the 2026
+# rebrand names), so a grant no longer translates between two vocabularies.
+# The pre-rebrand product ids are kept as read-only entries because orders
+# placed before the rebrand still carry them and may be re-notified by
+# Midtrans at any time.
 TIER_PRODUCTS = {
-    "foundation": "foundation",
-    "acceleration": "pro",
-    "intelligence": "enterprise",
-    # Legacy/alternate ids for the same plans.
-    "pro": "pro",
+    "operational": "operational",
+    "business": "business",
     "enterprise": "enterprise",
+    # Legacy product ids -> their canonical tier.
+    "foundation": "operational",
+    "pro": "business",
+    "acceleration": "business",
+    "intelligence": "enterprise",
 }
 
 # One-off products -> the flag(s) appended to identity.user_tiers.features.

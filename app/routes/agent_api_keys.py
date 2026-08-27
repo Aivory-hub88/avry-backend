@@ -36,7 +36,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.database.db_service import DatabaseService
 from app.routes.agent_actions import get_current_user_payload
-from app.services import credit_service
+from app.services import credit_service, tiers
 from app.services.telegram_service import AGENT_TYPES, FALLBACK_REPLY, is_superadmin, load_user_record
 from app.utils.cache import check_rate_limit
 
@@ -52,8 +52,10 @@ _db_service = DatabaseService()
 # execution surface (it's the exact same message/reply loop Telegram/Slack/
 # Console already run, just a new transport), so this is purely which plans
 # get raw API access as a differentiator.
-_TIER_ORDER = {"foundation": 0, "pro": 1, "enterprise": 2}
-_MIN_TIER = "pro"
+# Ladder and aliases live in app/services/tiers.py — this route used to
+# declare its own, which is how it ended up on the pre-rebrand names while
+# tenant_mcp_servers.py had already moved to the 2026 ones.
+_MIN_TIER = "business"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS product.agent_api_keys (
@@ -77,14 +79,14 @@ _schema_ready = False
 
 # Soft cap per (user_id, agent_type) — a natural upsell lever more than a
 # hard technical limit; Enterprise gets a materially higher ceiling.
-_MAX_KEYS_PER_AGENT = {"pro": 3, "enterprise": 20}
+_MAX_KEYS_PER_AGENT = {"business": 3, "enterprise": 20}
 
 # Per-key request-rate ceiling — distinct from credit_service's balance gate.
 # Credits bound *cost*; this bounds raw request *volume* against a single key
 # (a misbehaving integration hammering the endpoint, or a leaked key used for
 # abuse before the tenant notices and revokes it). One fixed window per key,
 # not per user_id, so a tenant's other keys are unaffected by one noisy one.
-_RATE_LIMIT_PER_MINUTE = {"pro": 60, "enterprise": 300}
+_RATE_LIMIT_PER_MINUTE = {"business": 60, "enterprise": 300}
 _RATE_LIMIT_WINDOW_SECONDS = 60
 
 
@@ -115,8 +117,8 @@ def _check_agent_type(agent_type: str) -> None:
 def _require_pro_or_above(user: dict) -> dict:
     if is_superadmin(user):
         return user
-    tier = str(user.get("tier") or "foundation").lower()
-    if _TIER_ORDER.get(tier, 0) < _TIER_ORDER[_MIN_TIER]:
+    tier = tiers.account_tier(user.get("tier"))
+    if not tiers.meets(tier, _MIN_TIER):
         raise HTTPException(
             status_code=403,
             detail="API deployment is available on the Pro plan and above. Upgrade to create an API key.",
@@ -145,8 +147,8 @@ def create_key(body: CreateKeyRequest, user: dict = Depends(get_current_user_pay
     record = load_user_record(_db_service, user["user_id"]) or {"user_id": user["user_id"]}
     _require_pro_or_above(record)
 
-    tier = "enterprise" if is_superadmin(record) else str(record.get("tier") or "foundation").lower()
-    max_keys = _MAX_KEYS_PER_AGENT.get(tier, _MAX_KEYS_PER_AGENT["pro"])
+    tier = "enterprise" if is_superadmin(record) else tiers.account_tier(record.get("tier"))
+    max_keys = _MAX_KEYS_PER_AGENT.get(tier, _MAX_KEYS_PER_AGENT["business"])
 
     conn = _connect()
     try:
@@ -328,8 +330,8 @@ def api_message(
             detail="API deployment requires the Pro plan or above; this account no longer qualifies.",
         )
 
-    tier = "enterprise" if is_superadmin(user) else str(user.get("tier") or "foundation").lower()
-    rate_limit = _RATE_LIMIT_PER_MINUTE.get(tier, _RATE_LIMIT_PER_MINUTE["pro"])
+    tier = "enterprise" if is_superadmin(user) else tiers.account_tier(user.get("tier"))
+    rate_limit = _RATE_LIMIT_PER_MINUTE.get(tier, _RATE_LIMIT_PER_MINUTE["business"])
     if not is_superadmin(user):
         try:
             within_limit = check_rate_limit(
@@ -404,5 +406,4 @@ def api_message(
 def _tier_ok(user: dict) -> bool:
     if is_superadmin(user):
         return True
-    tier = str(user.get("tier") or "foundation").lower()
-    return _TIER_ORDER.get(tier, 0) >= _TIER_ORDER[_MIN_TIER]
+    return tiers.meets(user.get("tier"), _MIN_TIER)

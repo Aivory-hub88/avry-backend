@@ -28,6 +28,7 @@ from typing import Optional
 import requests
 
 from app.config import settings
+from app.services import tiers
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +46,13 @@ AGENT_TYPES = {
     "office_assistant": "Office Assistant Agent",
 }
 
-# Minimum subscription tier per agent type (tiers: foundation < pro < enterprise;
-# there is no free tier). Unlisted agents are available on every paid tier.
+# Minimum subscription tier per agent type (operational < business <
+# enterprise; see app/services/tiers.py). Unlisted agents are available on
+# every paid tier.
 AGENT_MIN_TIER = {
     "office_assistant": "enterprise",
 }
 
-_TIER_ORDER = {"foundation": 0, "pro": 1, "enterprise": 2}
 
 
 def is_superadmin(user) -> bool:
@@ -67,8 +68,8 @@ def agent_tier_error(user, agent_type: str):
         return None
     if is_superadmin(user):
         return None
-    tier = str((user or {}).get("tier") or "foundation").lower()
-    if _TIER_ORDER.get(tier, 0) < _TIER_ORDER.get(required, 99):
+    tier = tiers.account_tier((user or {}).get("tier"))
+    if not tiers.meets(tier, required):
         name = AGENT_TYPES.get(agent_type, agent_type)
         return f"{name} is available on the Enterprise plan. Upgrade to deploy it."
     return None
@@ -122,8 +123,8 @@ def _approval_keyboard(pending_approval: Optional[dict]) -> Optional[dict]:
 def load_user_record(db, user_id: str) -> Optional[dict]:
     """Load a user (+ current subscription tier) — Postgres on prod, file store in dev.
 
-    The tier lives in user_tiers (written by the payments flow); an expired
-    entitlement row counts as the base tier.
+    The tier lives in user_tiers (written by the payments flow); an expired or
+    missing entitlement row counts as `tiers.FREE_TIER`, i.e. no plan.
     """
     dsn = os.getenv("DATABASE_URL")
     if dsn:
@@ -154,7 +155,12 @@ def load_user_record(db, user_id: str) -> Optional[dict]:
                         "account_type": row[1] or "free",
                         "is_active": row[2],
                         "is_superadmin": bool(row[3]),
-                        "tier": (tier or "foundation").lower(),
+                        # `tier` is None here when the account has no
+                        # entitlement row or its subscription has lapsed (see
+                        # the expiry check above). That used to resolve to the
+                        # base PAID tier, so a lapsed subscriber — and anyone
+                        # who never paid — kept the paid feature set.
+                        "tier": tiers.account_tier(tier),
                     }
             finally:
                 conn.close()
@@ -162,7 +168,7 @@ def load_user_record(db, user_id: str) -> Optional[dict]:
             logger.error(f"Postgres user lookup failed, using file store: {e}")
     user = db.load_json("users", user_id)
     if user is not None and not user.get("tier"):
-        user["tier"] = "foundation"
+        user["tier"] = tiers.FREE_TIER
     return user
 
 
@@ -465,7 +471,7 @@ class TelegramService:
             "user_id": record["user_id"],
             "account_type": user.get("account_type", "free"),
             # superadmins get the effective top tier (monitoring/testing access)
-            "tier": "enterprise" if is_superadmin(user) else user.get("tier", "foundation"),
+            "tier": "enterprise" if is_superadmin(user) else tiers.account_tier(user.get("tier")),
             "agent_type": agent_type,
             "agent_name": AGENT_TYPES.get(agent_type, agent_type),
             "status": "active",

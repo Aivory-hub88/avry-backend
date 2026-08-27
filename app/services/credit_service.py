@@ -22,12 +22,23 @@ import logging
 import os
 from typing import Optional
 
+from app.services import tiers
+
 logger = logging.getLogger(__name__)
 
 # Monthly credit allowance per tier — mirrors the pricing page
-# (foundation $20/80cr, pro $44/220cr, enterprise $499/3000cr).
-TIER_ALLOWANCES = {"foundation": 80, "pro": 220, "enterprise": 3000}
-DEFAULT_ALLOWANCE = TIER_ALLOWANCES["foundation"]
+# (operational $39/80cr, business $99/220cr, enterprise sales-assisted/3000cr).
+# The table itself lives in app/services/tiers.py so the gates, the allowances
+# and the published prices cannot drift apart again; the previous comment here
+# still quoted $20/$44, prices that had not been charged for some time.
+# Allowance lookups below deliberately use `tiers.normalise`, NOT
+# `tiers.account_tier`: normalise keeps the base-tier fallback, so an account
+# with no live plan still seeds the same monthly Intelligence Credit allowance
+# it always has. `account_tier` is for gating feature ACCESS; swapping it in
+# here would change how many credits an account is seeded with, which is a
+# separate product decision and is not part of closing the access leak.
+TIER_ALLOWANCES = tiers.TIER_ALLOWANCES
+DEFAULT_ALLOWANCE = TIER_ALLOWANCES[tiers.BASE_TIER]
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS billing.user_credits (
@@ -90,15 +101,15 @@ def _resolve_access(cur, user_id: str) -> dict:
     )
     row = cur.fetchone()
     if not row:
-        return {"tier": "foundation", "superadmin": False, "known": False}
+        return {"tier": tiers.FREE_TIER, "superadmin": False, "known": False}
     account_type, is_superadmin, tier, expires_at = row
     superadmin = bool(is_superadmin) or str(account_type or "").lower() == "superadmin"
     cur.execute("SELECT now()")
     now = cur.fetchone()[0]
     if expires_at is not None and expires_at < now:
-        tier = None  # entitlement lapsed -> base tier
+        tier = None  # entitlement lapsed -> no plan
     return {
-        "tier": str(tier or "foundation").lower(),
+        "tier": tiers.account_tier(tier),
         "superadmin": superadmin,
         "known": True,
     }
@@ -164,7 +175,7 @@ def get_status(user_id: str) -> dict:
             if access["superadmin"]:
                 conn.commit()
                 return {"unlimited": True, "tier": access["tier"], "balance": None, "allowance": None}
-            allowance = TIER_ALLOWANCES.get(access["tier"], DEFAULT_ALLOWANCE)
+            allowance = TIER_ALLOWANCES.get(tiers.normalise(access["tier"]), DEFAULT_ALLOWANCE)
             balance = _locked_row(cur, user_id, allowance)
         conn.commit()
         return {"unlimited": False, "tier": access["tier"], "balance": balance, "allowance": allowance}
@@ -184,7 +195,7 @@ def consume(user_id: str, amount: int, reason: str, meta: Optional[dict] = None)
             if access["superadmin"]:
                 conn.commit()
                 return {"unlimited": True, "tier": access["tier"], "balance": None}
-            allowance = TIER_ALLOWANCES.get(access["tier"], DEFAULT_ALLOWANCE)
+            allowance = TIER_ALLOWANCES.get(tiers.normalise(access["tier"]), DEFAULT_ALLOWANCE)
             balance = _locked_row(cur, user_id, allowance)
             if balance < amount:
                 conn.rollback()
@@ -213,7 +224,7 @@ def grant(user_id: str, amount: int, reason: str = "manual_grant", meta: Optiona
         _ensure_schema(conn)
         with conn.cursor() as cur:
             access = _resolve_access(cur, user_id)
-            allowance = TIER_ALLOWANCES.get(access["tier"], DEFAULT_ALLOWANCE)
+            allowance = TIER_ALLOWANCES.get(tiers.normalise(access["tier"]), DEFAULT_ALLOWANCE)
             balance = _locked_row(cur, user_id, allowance)
             balance += amount
             cur.execute(

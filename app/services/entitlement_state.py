@@ -20,10 +20,15 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
+from app.services import tiers
+
 logger = logging.getLogger(__name__)
 
 # Subscription tiers that mean "currently paying".
-SUBSCRIPTION_TIERS = {"foundation", "pro", "enterprise"}
+# Canonical tier ids plus the pre-rebrand aliases still present in older
+# identity.user_tiers rows, so a legacy value is still recognised as a
+# subscription rather than silently treated as no plan at all.
+SUBSCRIPTION_TIERS = set(tiers.CANONICAL_TIERS) | set(tiers.ALIASES)
 
 # A feature flag alone implies a tier, mirroring the legacy JSON logic where
 # buying the blueprint put the user on the `blueprint` tier.
