@@ -21,9 +21,8 @@ def test_imports():
         "app.config",
         "app.routes.auth",
         "app.models.user",
-        "app.models.user_tier",
         "app.services.auth_service",
-        "app.services.tier_service",
+        "app.services.tiers",
         "app.services.audit_logger",
         "app.database.db_service",
     ]
