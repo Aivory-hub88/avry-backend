@@ -28,6 +28,10 @@ Internal (Cerveau-facing, X-Internal-Token):
     GET /api/v1/tenant-mcp-servers/internal/{user_id}/{agent_type}
         -> decrypted, status='verified' rows only
 
+Registration quota is per (user_id, agent_type) and scales with the plan:
+Operational 1, Business 3, Enterprise 10 (`_MAX_SERVERS_BY_TIER`). A
+superadmin resolves to Enterprise, matching auth_service._compute_tier.
+
 Tier gate: Pro and Enterprise (§B6, revised 2026-08-15 — the original
 Enterprise-only recommendation was a starting-population choice, not a
 technical requirement; B1-B5's guarded-fetcher now has a real, live-verified
@@ -78,9 +82,20 @@ _MIN_TIER = "operational"
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,40}$")
 _MAX_ERROR_LEN = 500
 
-# v1 caps at one row per (user_id, agent_type) — schema supports more later
-# without a migration, but route logic enforces this today.
-_MAX_SERVERS_PER_AGENT = 1
+# Per-agent registration quota, by plan. The original v1 cap was a flat 1 for
+# every caller, which made the cheapest paid rung and Enterprise identical on
+# the one axis this feature actually scales along — and left a superadmin
+# unable to register a second server at all. The schema always supported more
+# than one row per (user_id, agent_type); only route logic capped it.
+#
+# `enterprise` is deliberately bounded rather than unlimited: every tool on a
+# tenant-supplied server is a black box Aivory never reviewed (§B5), so the
+# blast radius of one account stays finite.
+_MAX_SERVERS_BY_TIER = {
+    "operational": 1,
+    "business": 3,
+    "enterprise": 10,
+}
 
 _VERIFY_CONNECT_TIMEOUT = 3.0
 _VERIFY_TOTAL_TIMEOUT = 10.0
@@ -142,7 +157,7 @@ def _check_agent_type(agent_type: str) -> None:
         raise HTTPException(status_code=404, detail=f"Unknown agent type '{agent_type}'")
 
 
-def _require_pro_or_above(user_id: str) -> None:
+def _require_paid_tier(user_id: str) -> str:
     # The JWT payload never carries `tier` (create_access_token only bakes in
     # user_id/email/account_type) — every real tier check must re-load the
     # current record from Postgres, same pattern telegram.py's agent_chat
@@ -150,13 +165,17 @@ def _require_pro_or_above(user_id: str) -> None:
     # real non-superadmin caller regardless of their actual plan.
     record = load_user_record(_db_service, user_id) or {"user_id": user_id}
     if is_superadmin(record):
-        return
+        # A superadmin holds the Enterprise feature set everywhere else
+        # (auth_service._compute_tier returns tier="enterprise" for one), so
+        # it resolves to Enterprise here too rather than to a bare pass.
+        return "enterprise"
     tier = tiers.account_tier(record.get("tier"))
     if not tiers.meets(tier, _MIN_TIER):
         raise HTTPException(
             status_code=403,
             detail="Custom MCP servers are available on paid plans (Operational, Business, or Enterprise). Upgrade to register one.",
         )
+    return tier
 
 
 def _require_cerveau_engine(user_id: str, agent_type: str) -> None:
@@ -324,7 +343,7 @@ def _row_to_public_dict(row) -> dict:
 @router.post("", status_code=201)
 def register_server(body: RegisterServerRequest, user: dict = Depends(get_current_user_payload)):
     _check_agent_type(body.agent_type)
-    _require_pro_or_above(user["user_id"])
+    tier = _require_paid_tier(user["user_id"])
     _require_cerveau_engine(user["user_id"], body.agent_type)
     _validate_https_url(body.url)
 
@@ -344,10 +363,17 @@ def register_server(body: RegisterServerRequest, user: dict = Depends(get_curren
                 (user["user_id"], body.agent_type),
             )
             (active_count,) = cur.fetchone()
-            if active_count >= _MAX_SERVERS_PER_AGENT:
+            # .get, not [] — _require_paid_tier can only return a canonical
+            # tier today, but a KeyError here would 500 a registration.
+            quota = _MAX_SERVERS_BY_TIER.get(tier, 1)
+            if active_count >= quota:
+                plural = "server" if quota == 1 else "servers"
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Only {_MAX_SERVERS_PER_AGENT} custom MCP server is allowed per agent today. Remove the existing one first.",
+                    detail=(
+                        f"Your {tiers.display_name(tier)} plan allows {quota} custom MCP {plural} "
+                        f"per agent. Remove one before registering another."
+                    ),
                 )
 
             cur.execute(
@@ -495,7 +521,7 @@ def reverify_server(server_id: str, user: dict = Depends(get_current_user_payloa
     if not row:
         raise HTTPException(status_code=404, detail="Server not found")
     agent_type, url, auth_header_name, encrypted = row
-    _require_pro_or_above(user["user_id"])
+    _require_paid_tier(user["user_id"])
     _require_cerveau_engine(user["user_id"], agent_type)
 
     auth_header_value = None

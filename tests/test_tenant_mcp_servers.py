@@ -181,5 +181,52 @@ class RegisterServerRequestValidation(unittest.TestCase):
             )
 
 
+class TierQuota(unittest.TestCase):
+    """`_require_paid_tier` returns the tier the quota is read from, so the
+    two have to stay in step: every tier the gate can hand back must have a
+    quota, and the ladder must be non-decreasing."""
+
+    def test_every_paid_tier_has_a_quota(self):
+        from app.services import tiers
+
+        for tier in tiers.CANONICAL_TIERS:
+            self.assertIn(tier, m._MAX_SERVERS_BY_TIER)
+
+    def test_quota_is_non_decreasing_up_the_ladder(self):
+        from app.services import tiers
+
+        quotas = [m._MAX_SERVERS_BY_TIER[t] for t in tiers.CANONICAL_TIERS]
+        self.assertEqual(quotas, sorted(quotas))
+        self.assertGreater(quotas[-1], quotas[0])
+
+    def test_superadmin_resolves_to_enterprise(self):
+        with patch("app.routes.tenant_mcp_servers.load_user_record", return_value={"user_id": "u", "tier": "free"}), \
+             patch("app.routes.tenant_mcp_servers.is_superadmin", return_value=True):
+            self.assertEqual(m._require_paid_tier("u"), "enterprise")
+
+    def test_paid_tier_returned_verbatim(self):
+        with patch("app.routes.tenant_mcp_servers.load_user_record", return_value={"user_id": "u", "tier": "business"}), \
+             patch("app.routes.tenant_mcp_servers.is_superadmin", return_value=False):
+            self.assertEqual(m._require_paid_tier("u"), "business")
+
+    def test_legacy_alias_resolves_before_quota_lookup(self):
+        # "pro" is a pre-rebrand id still present on old rows; it must land on
+        # `business`, not fall through to the defensive quota of 1.
+        with patch("app.routes.tenant_mcp_servers.load_user_record", return_value={"user_id": "u", "tier": "pro"}), \
+             patch("app.routes.tenant_mcp_servers.is_superadmin", return_value=False):
+            tier = m._require_paid_tier("u")
+        self.assertEqual(tier, "business")
+        self.assertEqual(m._MAX_SERVERS_BY_TIER[tier], 3)
+
+    def test_free_tier_rejected(self):
+        from fastapi import HTTPException
+
+        with patch("app.routes.tenant_mcp_servers.load_user_record", return_value={"user_id": "u", "tier": None}), \
+             patch("app.routes.tenant_mcp_servers.is_superadmin", return_value=False):
+            with self.assertRaises(HTTPException) as ctx:
+                m._require_paid_tier("u")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
