@@ -172,6 +172,18 @@ try:
 except Exception as e:
     print(f"[!] Credits routes failed: {e}")
 
+# The container runs THIS file (`python main.py`), not app/main.py, and only
+# app/main.py had ever registered this router — so every free-assessment lead
+# and funnel event POSTed by the landing site hit an unmounted path and came
+# back 404. Nothing was stored and nothing was logged as an error, because a
+# 404 is not an exception; the misses are only visible in the access log.
+try:
+    from app.routes.assessment_leads import router as assessment_leads_router
+    app.include_router(assessment_leads_router)
+    print("[OK] Assessment leads routes registered")
+except Exception as e:
+    print(f"[!] Assessment leads routes failed: {e}")
+
 try:
     from app.routes.trap_hits import router as trap_hits_router
     app.include_router(trap_hits_router)
