@@ -97,9 +97,9 @@ class Ingest(unittest.TestCase):
             body = call.kwargs["json"]
             # A tenant-scoped write with no host agent is a 400 by design.
             self.assertEqual(body["agent"], m.CERVEAU_HOST_AGENT)
-            # `core` is the durable tier: the Postgres lifecycle age-prunes
-            # only `conversation` and `daily`.
-            self.assertEqual(body["category"], "core")
+            # Its own tier: never age-pruned, and outside the `core` budget
+            # whose recency ordering would evict an old document first.
+            self.assertEqual(body["category"], "document")
             self.assertIn("[Document: faq.pdf — part", body["content"])
 
     def test_keys_are_deterministic_so_a_re_upload_upserts(self):

@@ -21,12 +21,22 @@ Two things about that endpoint shape this module:
      re-uploading the same filename updates its chunks in place instead of
      duplicating them.
 
-Category: `core`. Cerveau's Postgres lifecycle (`PostgresMemory::run_lifecycle`)
-age-prunes only `conversation` and `daily`; `core` is the durable tier, bounded
-only by a per-tenant row budget. (`[memory] purge_after_days` and
-`[memory.policy.retention_days_by_category]` belong to the SQLite/filesystem
-hygiene path, which never touches the Postgres backend — see
-docs/CERVEAU-TECHNICAL-REFERENCE.md §3.)
+Category: `document`, its own tier rather than `core`. What actually runs in
+production is `/usr/local/bin/cerveau-lifecycle.sh` (daily via
+`cerveau-lifecycle.timer`), mirroring `PostgresMemory::run_lifecycle`: it
+age-prunes `conversation` and `daily`, and budget-evicts `core`/`daily`/
+`conversation` down to a per-tenant row cap ordered by
+`importance DESC NULLS LAST, created_at DESC`. The Postgres store never writes
+`importance`, so that ordering is pure recency — under `core`, an uploaded
+document would be evicted before newer conversational memories once a tenant
+passed 2 000 core rows. Documents are what an operator deliberately put there,
+so they get a tier that is never age-pruned and carries its own generous cap
+(see the `document` entry in that script).
+
+(`[memory] purge_after_days` and `[memory.policy.retention_days_by_category]`
+belong to the SQLite/filesystem hygiene path, which never touches the Postgres
+backend at all — so the 30-day purge once feared for ingested documents was
+never the real risk. See docs/CERVEAU-TECHNICAL-REFERENCE.md §3.3.)
 """
 
 import logging
@@ -160,7 +170,7 @@ def ingest_document(user_id: str, agent_type: str, filename: str, text: str) -> 
             # Self-describing content: a recall hit is shown to the model on its
             # own, without the filename it came from unless it is in the text.
             "content": f"[Document: {filename} — part {idx} of {total}]\n{chunk}",
-            "category": "core",
+            "category": "document",
             "agent": CERVEAU_HOST_AGENT,
         }
         for base in CERVEAU_BASES:
