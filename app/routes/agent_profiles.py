@@ -18,9 +18,10 @@ Dashboard-facing (JWT auth):
     PUT /api/v1/agent-profiles/{agent_type}      -> upsert
     DELETE /api/v1/agent-profiles/{agent_type}   -> reset to default identity
     POST /api/v1/agent-profiles/{agent_type}/knowledge/document
-        -> extract text from an uploaded document (PDF/Word/Excel/CSV/text)
-           and return it merged into the knowledge field; does not save by
-           itself -- the dashboard still calls PUT to persist it
+        -> extract text from an uploaded document (PDF/Word/Excel/CSV/text).
+           On Cerveau it is chunked into the tenant's own embedded memory and
+           persisted immediately; on the legacy engine it comes back merged
+           into the knowledge field for the dashboard to save via PUT
 
 Internal (bridge-facing, X-Internal-Token):
     GET /api/v1/agent-profiles/internal/{user_id}/{agent_type}
@@ -39,10 +40,11 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
-from app.services import attachment_extractor
+from app.services import attachment_extractor, cerveau_memory
 
 logger = logging.getLogger(__name__)
 
@@ -131,8 +133,10 @@ _COLUMNS = [
     "business_description", "knowledge", "custom_instructions", "greeting",
 ]
 
-# Internal-only superset — adds `engine`, the Phase 6.1 rollout flag. Never
-# used by the dashboard-facing routes below.
+# Internal-only superset — adds `engine`, the Phase 6.1 rollout flag. It is
+# never RETURNED by a dashboard-facing route; the document-upload route does
+# read it, to decide whether the upload goes into Cerveau memory or the flat
+# knowledge field, but the value itself stays server-side.
 _INTERNAL_COLUMNS = _COLUMNS + ["engine"]
 
 
@@ -159,8 +163,8 @@ def load_profile(user_id: str, agent_type: str) -> Optional[dict]:
 
 
 def load_profile_internal(user_id: str, agent_type: str) -> Optional[dict]:
-    """Same as load_profile(), plus `engine`. Bridge-facing only — see the
-    module docstring for why this stays off the dashboard-facing routes."""
+    """Same as load_profile(), plus `engine`. The value is bridge-facing only —
+    see the module docstring for why it is never exposed on a dashboard route."""
     conn = _connect()
     try:
         _ensure_schema(conn)
@@ -245,11 +249,26 @@ async def upload_knowledge_document(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user_payload),
 ):
-    """Extract text from an uploaded document and merge it into this agent's
-    knowledge field. Reuses the same extractor Telegram/Slack attachments go
-    through -- no new parsing logic, no new storage: the merged text is
-    returned for the dashboard to place in the Knowledge field and save via
-    the normal PUT, exactly like typing it in by hand would."""
+    """Take an uploaded document into this agent's knowledge.
+
+    Two paths, chosen by which engine serves the agent:
+
+    - **Cerveau** (`engine = 'cerveau'`): the text is chunked and stored as
+      embedded, tenant-scoped memories via Cerveau's `POST /api/memory`. It is
+      retrieved by relevance at recall time, so a long document is no longer
+      truncated to 12 000 chars and no longer rides along in every prompt.
+      Persisted on upload -- there is nothing for the dashboard to save
+      afterwards.
+
+    - **Legacy**: unchanged. The extracted text is merged into the knowledge
+      field and returned for the dashboard to place there and save via the
+      normal PUT, exactly like typing it in by hand would. The legacy agent
+      loop has no tenant memory to read from, so the flat field is still the
+      only mechanism it has.
+
+    The response carries `ingested` so the dashboard can tell the two apart;
+    `knowledge` is always present, and on the Cerveau path it is the stored
+    value unchanged (nothing to merge)."""
     _check_agent_type(agent_type)
     filename = file.filename or "document"
     ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -259,21 +278,53 @@ async def upload_knowledge_document(
             detail="Unsupported file type. Try PDF, Word (.docx), Excel (.xlsx), CSV, or plain text.",
         )
 
+    try:
+        current = load_profile_internal(user["user_id"], agent_type)
+    except Exception as e:
+        logger.error(f"profile lookup failed before knowledge upload: {e}")
+        raise HTTPException(status_code=503, detail="Profile store unavailable")
+
+    to_cerveau = ((current or {}).get("engine") or "legacy") == "cerveau"
+    # Only the Cerveau path can afford the large extraction: on the legacy path
+    # the text is headed for a 12 000-char prompt field, so extracting more
+    # would just be thrown away.
+    max_chars = cerveau_memory.MAX_INGEST_CHARS if to_cerveau else attachment_extractor.MAX_EXTRACTED_CHARS
+
     data = await file.read()
-    extracted = attachment_extractor.extract_document_text(filename, data, file.content_type)
+    extracted = attachment_extractor.extract_document_text(
+        filename, data, file.content_type, max_chars=max_chars
+    )
     if not extracted:
         raise HTTPException(status_code=422, detail=f"Could not extract any text from '{filename}'.")
     if extracted.startswith("[") and extracted.endswith("]"):
         # extractor's own placeholder for "too large" / "could not read" cases
         raise HTTPException(status_code=422, detail=extracted[1:-1])
 
-    try:
-        current = load_profile(user["user_id"], agent_type)
-    except Exception as e:
-        logger.error(f"profile lookup failed before knowledge upload: {e}")
-        raise HTTPException(status_code=503, detail="Profile store unavailable")
-
     existing = ((current or {}).get("knowledge") or "").strip()
+
+    if to_cerveau:
+        try:
+            chunks, truncated = await run_in_threadpool(
+                cerveau_memory.ingest_document,
+                user["user_id"], agent_type, filename, extracted,
+            )
+        except cerveau_memory.IngestError as e:
+            logger.error(f"cerveau document ingest failed for {agent_type}: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail="Could not add that document to the agent's memory. Please try again.",
+            )
+        return {
+            "ingested": True,
+            "chunks": chunks,
+            "filename": filename,
+            # Unchanged -- the document did not go into this field, and handing
+            # back anything else would make the dashboard overwrite it.
+            "knowledge": existing,
+            "truncated": truncated,
+            "extracted_chars": len(extracted),
+        }
+
     section = f"--- From {filename} ---\n{extracted}"
     combined = f"{existing}\n\n{section}" if existing else section
 
@@ -281,7 +332,12 @@ async def upload_knowledge_document(
     truncated = len(combined) > cap
     combined = _sanitize(combined, cap) or ""
 
-    return {"knowledge": combined, "truncated": truncated, "extracted_chars": len(extracted)}
+    return {
+        "ingested": False,
+        "knowledge": combined,
+        "truncated": truncated,
+        "extracted_chars": len(extracted),
+    }
 
 
 @router.put("/{agent_type}")

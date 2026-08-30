@@ -35,10 +35,10 @@ _TEXT_EXTS = {".txt", ".md", ".log", ".json", ".yaml", ".yml", ".text"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
 
-def _truncate(text: str) -> str:
+def _truncate(text: str, max_chars: int = MAX_EXTRACTED_CHARS) -> str:
     text = (text or "").strip()
-    if len(text) > MAX_EXTRACTED_CHARS:
-        return text[:MAX_EXTRACTED_CHARS] + "\n\n[...document truncated...]"
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n[...document truncated...]"
     return text
 
 
@@ -58,14 +58,14 @@ def is_image(filename: str, mime: Optional[str] = None) -> bool:
 # DOCUMENT EXTRACTION
 # ============================================================================
 
-def _extract_pdf(data: bytes) -> str:
+def _extract_pdf(data: bytes, max_chars: int = MAX_EXTRACTED_CHARS) -> str:
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
     parts = []
     for page in reader.pages:
         parts.append(page.extract_text() or "")
-        if sum(len(p) for p in parts) > MAX_EXTRACTED_CHARS:
+        if sum(len(p) for p in parts) > max_chars:
             break
     return "\n".join(parts)
 
@@ -81,7 +81,7 @@ def _extract_docx(data: bytes) -> str:
     return "\n".join(parts)
 
 
-def _extract_xlsx(data: bytes) -> str:
+def _extract_xlsx(data: bytes, max_chars: int = MAX_EXTRACTED_CHARS) -> str:
     from openpyxl import load_workbook
 
     wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
@@ -92,7 +92,7 @@ def _extract_xlsx(data: bytes) -> str:
             cells = ["" if c is None else str(c) for c in row]
             if any(cells):
                 parts.append(" | ".join(cells))
-            if sum(len(p) for p in parts) > MAX_EXTRACTED_CHARS:
+            if sum(len(p) for p in parts) > max_chars:
                 break
     wb.close()
     return "\n".join(parts)
@@ -104,23 +104,33 @@ def _extract_csv(data: bytes) -> str:
     return "\n".join(" | ".join(r) for r in rows)
 
 
-def extract_document_text(filename: str, data: bytes, mime: Optional[str] = None) -> Optional[str]:
-    """Extract readable text from a document. Returns None if unsupported."""
+def extract_document_text(
+    filename: str,
+    data: bytes,
+    mime: Optional[str] = None,
+    max_chars: int = MAX_EXTRACTED_CHARS,
+) -> Optional[str]:
+    """Extract readable text from a document. Returns None if unsupported.
+
+    `max_chars` defaults to the prompt-injection cap that Telegram/Slack
+    attachments need. Document ingestion into Cerveau memory passes a much
+    larger one: that text is chunked and embedded, not pasted into every
+    prompt, so the reason for the small cap does not apply there."""
     if len(data) > MAX_FILE_BYTES:
         return "[This document is too large to read (over 20 MB).]"
 
     ext = _ext(filename)
     try:
         if ext == ".pdf" or mime == "application/pdf":
-            return _truncate(_extract_pdf(data))
+            return _truncate(_extract_pdf(data, max_chars), max_chars)
         if ext == ".docx" or (mime or "").endswith("wordprocessingml.document"):
-            return _truncate(_extract_docx(data))
+            return _truncate(_extract_docx(data), max_chars)
         if ext in (".xlsx", ".xlsm") or (mime or "").endswith("spreadsheetml.sheet"):
-            return _truncate(_extract_xlsx(data))
+            return _truncate(_extract_xlsx(data, max_chars), max_chars)
         if ext == ".csv" or mime == "text/csv":
-            return _truncate(_extract_csv(data))
+            return _truncate(_extract_csv(data), max_chars)
         if ext in _TEXT_EXTS or (mime or "").startswith("text/"):
-            return _truncate(data.decode("utf-8", errors="replace"))
+            return _truncate(data.decode("utf-8", errors="replace"), max_chars)
     except Exception as e:
         logger.error(f"Document extraction failed for {filename}: {e}")
         return f"[Could not read '{filename}' — the file may be corrupt or password-protected.]"
