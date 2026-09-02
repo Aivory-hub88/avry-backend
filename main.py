@@ -131,6 +131,13 @@ except Exception as e:
     print(f"[!] Agent approvals routes failed: {e}")
 
 try:
+    from app.routes.agent_memory import router as agent_memory_router
+    app.include_router(agent_memory_router)
+    print("[OK] Agent memory routes registered")
+except Exception as e:
+    print(f"[!] Agent memory routes failed: {e}")
+
+try:
     from app.routes.agent_api_keys import router as agent_api_keys_router
     app.include_router(agent_api_keys_router)
     print("[OK] Agent API key routes registered")
