@@ -181,6 +181,30 @@ class RegisterServerRequestValidation(unittest.TestCase):
             )
 
 
+class RowToPublicDict(unittest.TestCase):
+    """§B8: `tools`/`disabled_tools` must survive both a fully-populated row
+    and the defensive `None` case a pre-migration or mid-verification row
+    can still hand back for `tools_json`/`disabled_tools`."""
+
+    def _row(self, tools_json, disabled_tools):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        return ("id-1", "customer_service", "srv", "https://tenant.example/mcp", "streamable-http", None,
+                "verified", now, None, 2, now, tools_json, disabled_tools)
+
+    def test_populated_row(self):
+        tools = [{"name": "get_orders", "description": "List orders"}]
+        d = m._row_to_public_dict(self._row(tools, ["refund"]))
+        self.assertEqual(d["tools"], tools)
+        self.assertEqual(d["disabled_tools"], ["refund"])
+
+    def test_none_tools_and_disabled_tools_default_to_empty_list(self):
+        d = m._row_to_public_dict(self._row(None, None))
+        self.assertEqual(d["tools"], [])
+        self.assertEqual(d["disabled_tools"], [])
+
+
 class TierQuota(unittest.TestCase):
     """`_require_paid_tier` returns the tier the quota is read from, so the
     two have to stay in step: every tier the gate can hand back must have a

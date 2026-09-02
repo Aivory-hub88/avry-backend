@@ -22,6 +22,7 @@ Dashboard-facing (JWT auth):
     POST   /api/v1/tenant-mcp-servers            -> register + synchronously verify
     GET    /api/v1/tenant-mcp-servers?agent_type=... -> list (never returns the auth header value)
     POST   /api/v1/tenant-mcp-servers/{id}/reverify  -> re-run verification
+    PATCH  /api/v1/tenant-mcp-servers/{id}/tools     -> set per-tool disabled_tools (§B8)
     DELETE /api/v1/tenant-mcp-servers/{id}        -> disable
 
 Internal (Cerveau-facing, X-Internal-Token):
@@ -130,6 +131,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS tenant_custom_mcp_servers_user_agent_name_idx
     ON product.tenant_custom_mcp_servers (user_id, agent_type, name);
 """
 
+# Per-tool allow/deny (§B8): added after the table above already shipped, so
+# these ride in as an idempotent ALTER rather than the CREATE TABLE body —
+# `tools_json` is the last-verified {name, description} list (the dashboard
+# needs it to render checkboxes without re-verifying on every page load);
+# `disabled_tools` is the tenant's own denylist against that list, applied
+# by Cerveau's `TenantCustomMcpServer::disabled_tools` at MCP-connect time
+# (never by name lookup at call time — a disabled tool is never advertised
+# to the model in the first place, same posture as `disabled_toolkits`).
+_MIGRATE_SQL = """
+ALTER TABLE product.tenant_custom_mcp_servers
+    ADD COLUMN IF NOT EXISTS tools_json JSONB NOT NULL DEFAULT '[]',
+    ADD COLUMN IF NOT EXISTS disabled_tools TEXT[] NOT NULL DEFAULT '{}';
+"""
+
 _schema_ready = False
 
 
@@ -148,6 +163,7 @@ def _ensure_schema(conn) -> None:
         return
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_SQL)
+        cur.execute(_MIGRATE_SQL)
     conn.commit()
     _schema_ready = True
 
@@ -311,6 +327,12 @@ class RegisterServerRequest(BaseModel):
         return v
 
 
+_LIST_COLUMNS = (
+    "id, agent_type, name, url, transport, auth_header_name, status,"
+    " last_verified_at, last_verify_error, tool_count, created_at, tools_json, disabled_tools"
+)
+
+
 def _row_to_public_dict(row) -> dict:
     (
         row_id,
@@ -324,6 +346,8 @@ def _row_to_public_dict(row) -> dict:
         last_verify_error,
         tool_count,
         created_at,
+        tools_json,
+        disabled_tools,
     ) = row
     return {
         "id": str(row_id),
@@ -337,6 +361,11 @@ def _row_to_public_dict(row) -> dict:
         "last_verify_error": last_verify_error,
         "tool_count": tool_count,
         "created_at": created_at.isoformat(),
+        # `tools_json` defaults to '[]' at the column level, but a row
+        # written before this migration (or mid-verification) may still
+        # hand back a bare `None` from some driver/version combos.
+        "tools": tools_json if tools_json is not None else [],
+        "disabled_tools": list(disabled_tools) if disabled_tools else [],
     }
 
 
@@ -431,20 +460,25 @@ def _verify_and_persist(
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            # `disabled_tools` is intentionally left untouched by a
+            # reverify — a name that no longer appears in the refreshed
+            # tools_json is simply inert (nothing to match at connect
+            # time), and a tool the tenant already turned off stays off if
+            # the upstream server brings it back under the same name.
             cur.execute(
-                """
+                f"""
                 UPDATE product.tenant_custom_mcp_servers
                 SET status = %s, last_verified_at = %s, last_verify_error = %s,
-                    tool_count = %s, updated_at = now()
+                    tool_count = %s, tools_json = %s, updated_at = now()
                 WHERE id = %s
-                RETURNING id, agent_type, name, url, transport, auth_header_name,
-                          status, last_verified_at, last_verify_error, tool_count, created_at
+                RETURNING {_LIST_COLUMNS}
                 """,
                 (
                     status,
                     datetime.now(timezone.utc) if status == "verified" else None,
                     error,
                     len(tools) if status == "verified" else None,
+                    json.dumps(tools if status == "verified" else []),
                     row_id,
                 ),
             )
@@ -458,7 +492,6 @@ def _verify_and_persist(
 
     payload = _row_to_public_dict(row)
     if status == "verified":
-        payload["tools"] = tools
         return payload
     raise HTTPException(status_code=422, detail={"error": "verification_failed", "reason": error, "server": payload})
 
@@ -472,18 +505,14 @@ def list_servers(agent_type: Optional[str] = None, user: dict = Depends(get_curr
             if agent_type:
                 _check_agent_type(agent_type)
                 cur.execute(
-                    "SELECT id, agent_type, name, url, transport, auth_header_name, status,"
-                    " last_verified_at, last_verify_error, tool_count, created_at"
-                    " FROM product.tenant_custom_mcp_servers"
+                    f"SELECT {_LIST_COLUMNS} FROM product.tenant_custom_mcp_servers"
                     " WHERE user_id = %s AND agent_type = %s AND status != 'disabled'"
                     " ORDER BY created_at DESC",
                     (user["user_id"], agent_type),
                 )
             else:
                 cur.execute(
-                    "SELECT id, agent_type, name, url, transport, auth_header_name, status,"
-                    " last_verified_at, last_verify_error, tool_count, created_at"
-                    " FROM product.tenant_custom_mcp_servers"
+                    f"SELECT {_LIST_COLUMNS} FROM product.tenant_custom_mcp_servers"
                     " WHERE user_id = %s AND status != 'disabled'"
                     " ORDER BY created_at DESC",
                     (user["user_id"],),
@@ -534,6 +563,59 @@ def reverify_server(server_id: str, user: dict = Depends(get_current_user_payloa
     return _verify_and_persist(server_id, user["user_id"], agent_type, url, auth_header_name, auth_header_value)
 
 
+class UpdateDisabledToolsRequest(BaseModel):
+    disabled_tools: list[str] = Field(default_factory=list, max_length=500)
+
+
+@router.patch("/{server_id}/tools")
+def update_disabled_tools(server_id: str, body: UpdateDisabledToolsRequest, user: dict = Depends(get_current_user_payload)):
+    """Per-tool allow/deny for one already-verified server (§B8) — the
+    denylist Cerveau's `TenantCustomMcpServer::disabled_tools` applies at
+    MCP-connect time so a disabled tool is never advertised to the model,
+    mirroring `disabled_toolkits`' whole-toolkit denylist one level down.
+    Requires the row's own `tools_json` (not the live server) as the
+    source of truth for valid names — asking the tenant-supplied endpoint
+    to validate its own tool names would be circular and adds a network
+    round trip a config-only settings tab has no reason to take."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tools_json FROM product.tenant_custom_mcp_servers"
+                " WHERE id = %s AND user_id = %s AND status != 'disabled'",
+                (server_id, user["user_id"]),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Server not found")
+            (tools_json,) = row
+            known_names = {t["name"] for t in (tools_json or []) if isinstance(t, dict) and t.get("name")}
+            unknown = [n for n in body.disabled_tools if n not in known_names]
+            if unknown:
+                raise HTTPException(status_code=400, detail=f"Unknown tool name(s): {', '.join(unknown[:5])}")
+
+            cur.execute(
+                f"""
+                UPDATE product.tenant_custom_mcp_servers
+                SET disabled_tools = %s, updated_at = now()
+                WHERE id = %s AND user_id = %s
+                RETURNING {_LIST_COLUMNS}
+                """,
+                (list(dict.fromkeys(body.disabled_tools)), server_id, user["user_id"]),
+            )
+            updated = cur.fetchone()
+        conn.commit()
+        return _row_to_public_dict(updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"tenant MCP server tool-toggle failed for {server_id}: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+
+
 @router.delete("/{server_id}")
 def disable_server(server_id: str, user: dict = Depends(get_current_user_payload)):
     conn = _connect()
@@ -576,7 +658,7 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
         _ensure_schema(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT name, url, transport, auth_header_name, auth_header_value_encrypted, risk_tier"
+                "SELECT name, url, transport, auth_header_name, auth_header_value_encrypted, risk_tier, disabled_tools"
                 " FROM product.tenant_custom_mcp_servers"
                 " WHERE user_id = %s AND agent_type = %s AND status = 'verified'",
                 (user_id, agent_type),
@@ -589,7 +671,7 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
         conn.close()
 
     servers = []
-    for name, url, transport, auth_header_name, encrypted, risk_tier in rows:
+    for name, url, transport, auth_header_name, encrypted, risk_tier, disabled_tools in rows:
         auth_header_value = None
         if encrypted is not None:
             try:
@@ -605,6 +687,7 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
                 "auth_header_name": auth_header_name,
                 "auth_header_value": auth_header_value,
                 "risk_tier": risk_tier,
+                "disabled_tools": list(disabled_tools) if disabled_tools else [],
             }
         )
     return {"servers": servers}
