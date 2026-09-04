@@ -152,6 +152,13 @@ except Exception as e:
     print(f"[!] Tenant custom MCP server routes failed: {e}")
 
 try:
+    from app.routes.tenant_scheduled_runs import router as tenant_scheduled_runs_router
+    app.include_router(tenant_scheduled_runs_router)
+    print("[OK] Tenant scheduled run routes registered")
+except Exception as e:
+    print(f"[!] Tenant scheduled run routes failed: {e}")
+
+try:
     from app.routes.telegram import router as telegram_router
     app.include_router(telegram_router)
     print("[OK] Telegram routes registered")
