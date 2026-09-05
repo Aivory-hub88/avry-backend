@@ -30,7 +30,7 @@ setup_bot() {
   curl -sS "${api}/setWebhook" \
     -d "url=${url}" \
     -d "secret_token=${TELEGRAM_WEBHOOK_SECRET}" \
-    -d 'allowed_updates=["message"]' \
+    -d 'allowed_updates=["message","callback_query"]' \
     -d "drop_pending_updates=true"
   echo
   # Prompt-only UX: no visible command menu, branded profile

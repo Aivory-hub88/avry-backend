@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/credits", tags=["credits"])
 
-VALID_REASONS = {"agent_message", "diagnostic", "blueprint", "roadmap", "console"}
+VALID_REASONS = {"agent_message", "diagnostic", "blueprint", "roadmap", "console", "approval_resume"}
 
 
 class ConsumeRequest(BaseModel):

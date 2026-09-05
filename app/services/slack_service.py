@@ -378,7 +378,11 @@ class SlackService:
                     "session_id": f"slack_{installation['team_id']}_{channel}",
                     "text": text,
                 },
-                timeout=60,
+                # 195s: same headroom as telegram_service.py's call to the same
+                # endpoint (Phase 6.1) — risk-free here since this whole method
+                # already runs off Slack's own request/response cycle via a
+                # background task (slack.py's /events route ACKs Slack first).
+                timeout=195,
             )
             if resp.ok:
                 return (resp.json().get("reply") or FALLBACK_REPLY)[:39000]
