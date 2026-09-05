@@ -147,13 +147,33 @@ def _check_agent_type(agent_type: str) -> None:
         raise HTTPException(status_code=404, detail=f"Unknown agent type '{agent_type}'")
 
 
-def _require_paid_tier(user_id: str) -> str:
+def _effective_tier(user_id: str) -> str:
+    """The tier that decides this user's allowance, without judging it.
+
+    Split out from `_require_paid_tier` so the list route can report the
+    quota to a caller it must not reject — a tenant on a plan without
+    scheduled runs still needs the list endpoint to work (it returns their
+    zero rows), and telling them what their allowance *is* is the whole
+    point of showing a quota.
+    """
     # Same reasoning as tenant_mcp_servers._require_paid_tier: the JWT never
     # carries `tier`, so the live record has to be re-read.
     record = load_user_record(_db_service, user_id) or {"user_id": user_id}
     if is_superadmin(record):
         return "enterprise"
-    tier = tiers.account_tier(record.get("tier"))
+    return tiers.account_tier(record.get("tier"))
+
+
+def _quota_for_tier(tier: str) -> int:
+    """Schedules allowed per agent on this tier. `0` below the minimum —
+    not an error, just nothing allowed, which is what the UI renders."""
+    if not tiers.meets(tier, _MIN_TIER):
+        return 0
+    return _MAX_SCHEDULES_BY_TIER.get(tier, 1)
+
+
+def _require_paid_tier(user_id: str) -> str:
+    tier = _effective_tier(user_id)
     if not tiers.meets(tier, _MIN_TIER):
         raise HTTPException(
             status_code=403,
@@ -412,7 +432,7 @@ def create_scheduled_run(
                 (user["user_id"], body.agent_type),
             )
             (active_count,) = cur.fetchone()
-            quota = _MAX_SCHEDULES_BY_TIER.get(tier, 1)
+            quota = _quota_for_tier(tier)
             if active_count >= quota:
                 plural = "run" if quota == 1 else "runs"
                 raise HTTPException(
@@ -487,7 +507,22 @@ def list_scheduled_runs(
         raise HTTPException(status_code=503, detail="Scheduled-run store unavailable")
     finally:
         conn.close()
-    return {"scheduled_runs": [_row_to_dict(r) for r in rows]}
+    # The quota travels with the list so the dashboard never has to keep its
+    # own copy of the ladder. A second copy would drift the first time a
+    # plan's allowance changed, and it would drift silently — the UI would
+    # keep promising an allowance the API no longer grants.
+    #
+    # `per_agent_limit`, not `limit`: the cap is per (user, agent_type), so a
+    # caller listing every agent at once must not read it as a total.
+    tier = _effective_tier(user["user_id"])
+    return {
+        "scheduled_runs": [_row_to_dict(r) for r in rows],
+        "quota": {
+            "per_agent_limit": _quota_for_tier(tier),
+            "tier": tier,
+            "tier_label": tiers.display_name(tier),
+        },
+    }
 
 
 @router.patch("/{run_id}")
