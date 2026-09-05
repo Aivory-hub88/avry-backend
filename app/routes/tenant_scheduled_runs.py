@@ -12,13 +12,18 @@ Dashboard-facing (JWT auth):
     POST   /api/v1/tenant-scheduled-runs                  -> create
     GET    /api/v1/tenant-scheduled-runs?agent_type=...    -> list
     PATCH  /api/v1/tenant-scheduled-runs/{id}              -> pause / resume / edit
+    POST   /api/v1/tenant-scheduled-runs/{id}/dismiss-lapsed -> clear a lapsed-approval flag
     DELETE /api/v1/tenant-scheduled-runs/{id}              -> soft-delete
 
 Internal (Cerveau-facing, X-Internal-Token):
-    GET /api/v1/tenant-scheduled-runs/internal/{user_id}/{agent_type}
-        -> that tenant's live schedules
-    GET /api/v1/tenant-scheduled-runs/internal/all
-        -> every live schedule, for the scheduler's own reconcile pass
+    GET  /api/v1/tenant-scheduled-runs/internal/{user_id}/{agent_type}
+         -> that tenant's live schedules
+    GET  /api/v1/tenant-scheduled-runs/internal/all
+         -> every live schedule, for the scheduler's own reconcile pass
+    POST /api/v1/tenant-scheduled-runs/internal/{id}/ack
+         -> the reconcile's ownership handshake
+    POST /api/v1/tenant-scheduled-runs/internal/{id}/lapsed-approval
+         -> ADR-009 §14: flag that a run raised a question nobody answered
 
 *** These schedules do not run yet. ***
 ADR-009 Phase 1 built the runtime half (a cron job can carry a tenant and
@@ -110,6 +115,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS tenant_scheduled_runs_user_agent_name_idx
 CREATE INDEX IF NOT EXISTS tenant_scheduled_runs_live_idx
     ON product.tenant_scheduled_runs (user_id, agent_type)
     WHERE deleted_at IS NULL;
+ALTER TABLE product.tenant_scheduled_runs
+    ADD COLUMN IF NOT EXISTS last_lapsed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS last_lapsed_tool TEXT;
 """
 
 _schema_ready = False
@@ -119,7 +127,8 @@ _schema_ready = False
 #: tenant editing a schedule needs to see what it actually asks.
 _LIST_COLUMNS = (
     "id, agent_type, name, prompt, cron_expression, timezone, enabled, status, "
-    "status_detail, last_synced_at, created_at, updated_at"
+    "status_detail, last_synced_at, created_at, updated_at, "
+    "last_lapsed_at, last_lapsed_tool"
 )
 
 
@@ -390,6 +399,7 @@ def _row_to_dict(row) -> dict:
     (
         row_id, agent_type, name, prompt, cron_expression, tz,
         enabled, status, status_detail, last_synced_at, created_at, updated_at,
+        last_lapsed_at, last_lapsed_tool,
     ) = row
     return {
         "id": str(row_id),
@@ -404,6 +414,15 @@ def _row_to_dict(row) -> dict:
         "last_synced_at": last_synced_at.isoformat() if last_synced_at else None,
         "created_at": created_at.isoformat() if created_at else None,
         "updated_at": updated_at.isoformat() if updated_at else None,
+        # ADR-009 §14 follow-up: the signal that a scheduled run raised a
+        # question nobody was there to answer — set by Cerveau's expiry
+        # sweep, cleared only by the tenant dismissing it (POST
+        # .../dismiss-lapsed). Deliberately independent of `status`: a
+        # schedule stays `active` and keeps firing while this sits flagged,
+        # because the schedule itself is not broken, one run's approval just
+        # went unanswered.
+        "last_lapsed_at": last_lapsed_at.isoformat() if last_lapsed_at else None,
+        "last_lapsed_tool": last_lapsed_tool,
     }
 
 
@@ -585,6 +604,45 @@ def update_scheduled_run(
     return {"scheduled_run": _row_to_dict(row)}
 
 
+@router.post("/{run_id}/dismiss-lapsed")
+def dismiss_lapsed_approval(run_id: str, user: dict = Depends(get_current_user_payload)):
+    """Acknowledge a `last_lapsed_at` flag and clear it.
+
+    Deliberately not routed through the generic PATCH above: that route
+    forces `status` back to `pending_activation` on *any* update, on the
+    reasoning that a content or enabled change invalidates whatever Cerveau
+    currently holds. Dismissing a lapsed-approval notice changes neither —
+    forcing a resync for it would flip an `active` schedule to
+    `pending_activation` for no reason and needlessly alarm the tenant
+    watching it.
+    """
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE product.tenant_scheduled_runs
+                   SET last_lapsed_at = NULL, last_lapsed_tool = NULL
+                 WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+                RETURNING {_LIST_COLUMNS}
+                """,
+                (run_id, user["user_id"]),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Scheduled run not found")
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"dismiss-lapsed failed for {user['user_id']}/{run_id}: {e}")
+        raise HTTPException(status_code=503, detail="Scheduled-run store unavailable")
+    finally:
+        conn.close()
+    return {"scheduled_run": _row_to_dict(row)}
+
+
 @router.delete("/{run_id}")
 def delete_scheduled_run(run_id: str, user: dict = Depends(get_current_user_payload)):
     """Soft-delete. The row stays so the sync can tell "remove this from
@@ -727,6 +785,62 @@ def internal_ack_sync(run_id: str, body: SyncAckRequest):
         raise
     except Exception as e:
         logger.error(f"scheduled-run sync ack failed for {run_id}: {e}")
+        raise HTTPException(status_code=503, detail="Scheduled-run store unavailable")
+    finally:
+        conn.close()
+    return {"status": "ok", "id": run_id}
+
+
+class LapsedApprovalRequest(BaseModel):
+    """What Cerveau's `approval_expiry` sweep reports: a run this schedule
+    fired raised an Irreversible-tool approval that nobody answered within
+    the window, so it lapsed unattended."""
+
+    tool_name: str = Field(..., min_length=1, max_length=200)
+
+
+@router.post(
+    "/internal/{run_id}/lapsed-approval",
+    dependencies=[Depends(require_internal_token)],
+)
+def internal_flag_lapsed_approval(run_id: str, body: LapsedApprovalRequest):
+    """ADR-009 §14 follow-up.
+
+    Retiring the approval on Cerveau's side closes it out of the
+    Notification Centre — but that was the *only* place it was ever
+    visible, so a tenant whose schedule raised a question nobody answered
+    would see it simply vanish with no trace anywhere. This is the record
+    that survives: it lands on the schedule itself, independent of
+    `status`, because the schedule is not broken — one run's approval
+    just went unanswered.
+
+    Deliberately its own endpoint rather than a field on `SyncAckRequest`:
+    the ack above is the reconcile's ownership handshake and always carries
+    a `status`; a lapsed approval can happen to a schedule that is already
+    `active` and stays `active`, so folding it into `ack` would force a
+    caller to invent a status value it does not actually have an opinion
+    about. A 404 here (schedule deleted between firing and the sweep
+    catching the lapse) is expected and Cerveau treats it as such — not
+    worth retrying.
+    """
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product.tenant_scheduled_runs"
+                "   SET last_lapsed_at = now(), last_lapsed_tool = %s, updated_at = now()"
+                " WHERE id = %s AND deleted_at IS NULL"
+                " RETURNING id",
+                (body.tool_name, run_id),
+            )
+            if cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Scheduled run not found")
+        conn.commit()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"lapsed-approval flag failed for {run_id}: {e}")
         raise HTTPException(status_code=503, detail="Scheduled-run store unavailable")
     finally:
         conn.close()
