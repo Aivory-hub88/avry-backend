@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # When unset, bound chats get a static acknowledgement reply.
     telegram_agent_gateway_url: Optional[str] = None
 
+    # Discord deployable-agent configuration. One shared bot for every agent
+    # type (unlike Telegram's per-agent-type option) — see discord_service.py.
+    discord_bot_token: Optional[str] = None
+    discord_application_id: Optional[str] = None
+    discord_link_token_ttl_minutes: int = 10
+
     # Slack deployable-agent configuration
     slack_client_id: Optional[str] = None
     slack_client_secret: Optional[str] = None
