@@ -44,6 +44,7 @@ ACTION_TYPES = {
     "workflow",      # any agent: n8n workflow triggered
     "integration",   # any agent: Composio action executed (e.g. email sent)
     "meeting",       # autonomous/office: structured meeting summary (Enterprise)
+    "task",          # any agent: task ledger entry moved to blocked or done
 }
 
 MAX_PAYLOAD_CHARS = 8000
