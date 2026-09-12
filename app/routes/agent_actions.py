@@ -10,6 +10,12 @@ Internal (bridge-facing, X-Internal-Token == TELEGRAM_GATEWAY_TOKEN):
 
 Dashboard-facing (JWT auth):
     GET  /api/v1/agent-actions            -> newest-first list (optional filters)
+
+Storage is Postgres (agent_actions table, app/database/pg_service.py). If the
+pool is down, a write falls back to the JSON file store instead of dropping
+the record — same posture as assessment_leads.py. Was flat JSON files only
+until the Agent Task Ledger's "task" action_type made GET-loads-every-file
+worth fixing before it actually became a problem.
 """
 
 import logging
@@ -32,6 +38,11 @@ db_service = DatabaseService()
 auth_service = AuthService(db_service)
 
 ACTIONS_COLLECTION = "agent_actions"
+
+try:
+    from app.database import pg_service as pg
+except ImportError:  # pragma: no cover - mirrors main.py's optional PG import
+    pg = None
 
 # What agent tools are allowed to record. Anything else is rejected so the
 # collection stays queryable by the dashboard.
@@ -81,7 +92,7 @@ def get_current_user_payload(authorization: Optional[str] = Header(None)) -> dic
 
 
 @router.post("/internal", dependencies=[Depends(require_internal_token)])
-def record_action(body: InternalActionRequest):
+async def record_action(body: InternalActionRequest):
     """Store one structured action produced by an agent tool."""
     if body.action_type not in ACTION_TYPES:
         raise HTTPException(status_code=400, detail=f"Unknown action_type '{body.action_type}'")
@@ -104,15 +115,23 @@ def record_action(body: InternalActionRequest):
         "payload": body.payload,
         "session_id": body.session_id,
         "channel": body.channel,
-        "created_at": now.isoformat(),
     }
-    db_service.save_json(ACTIONS_COLLECTION, action_id, record)
+
+    if pg and await pg.is_available():
+        try:
+            await pg.insert_agent_action(record)
+            logger.info(f"Agent action recorded: {body.action_type} by {body.agent_type} for {body.user_id}")
+            return {"ok": True, "action_id": action_id, "storage": "postgres"}
+        except Exception as e:
+            logger.error(f"[!] agent action PG insert failed, falling back to file: {e}")
+
+    db_service.save_json(ACTIONS_COLLECTION, action_id, {**record, "created_at": now.isoformat()})
     logger.info(f"Agent action recorded: {body.action_type} by {body.agent_type} for {body.user_id}")
-    return {"ok": True, "action_id": action_id}
+    return {"ok": True, "action_id": action_id, "storage": "file"}
 
 
 @router.get("")
-def list_actions(
+async def list_actions(
     action_type: Optional[str] = None,
     agent_type: Optional[str] = None,
     limit: int = 50,
@@ -120,11 +139,25 @@ def list_actions(
 ):
     """Newest-first action list for the dashboard."""
     limit = max(1, min(limit, 200))
+    user_id = user["user_id"]
+
+    if pg and await pg.is_available():
+        try:
+            actions = await pg.list_agent_actions(
+                user_id, action_type=action_type, agent_type=agent_type, limit=limit
+            )
+            total = await pg.count_agent_actions(
+                user_id, action_type=action_type, agent_type=agent_type
+            )
+            return {"actions": actions, "total": total, "storage": "postgres"}
+        except Exception as e:
+            logger.error(f"[!] agent action PG read failed, falling back to file: {e}")
+
     records = db_service.load_all_json(ACTIONS_COLLECTION) or []
-    mine = [r for r in records if r.get("user_id") == user["user_id"]]
+    mine = [r for r in records if r.get("user_id") == user_id]
     if action_type:
         mine = [r for r in mine if r.get("action_type") == action_type]
     if agent_type:
         mine = [r for r in mine if r.get("agent_type") == agent_type]
     mine.sort(key=lambda r: r.get("created_at", ""), reverse=True)
-    return {"actions": mine[:limit], "total": len(mine)}
+    return {"actions": mine[:limit], "total": len(mine), "storage": "file"}

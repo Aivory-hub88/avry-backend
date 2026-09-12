@@ -342,6 +342,28 @@ CREATE TABLE IF NOT EXISTS deleted_users_archive (
     deleted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     reason       TEXT NOT NULL
 );
+
+-- Agent action log (app/routes/agent_actions.py) -- structured records
+-- produced by deployable-agent tools (lead/ticket/invoice/task/...), one
+-- row per action. Was flat JSON files under data/agent_actions/ (one file
+-- per action_id, GET loading every file into memory); moved here once a
+-- real Postgres install existed, same as agent_catalog/assessment_leads
+-- above. action_id keeps the same sortable
+-- "<timestamp>_<random-hex>" shape the JSON store already generated, so no
+-- id scheme change on the write side.
+CREATE TABLE IF NOT EXISTS agent_actions (
+    action_id   TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    agent_type  TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    payload     JSONB DEFAULT '{}'::jsonb,
+    session_id  TEXT,
+    channel     TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_actions_user ON agent_actions(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_type ON agent_actions(action_type);
 """
 
 
@@ -763,3 +785,91 @@ async def assessment_funnel_daily(days: int = 30) -> list:
         }
         for r in rows
     ]
+
+
+# --- Agent action log --------------------------------------------------------
+
+_AGENT_ACTION_COLUMNS = (
+    "action_id, user_id, agent_type, action_type, payload, session_id, channel, created_at"
+)
+
+
+def _row_to_agent_action(row) -> dict:
+    d = dict(row)
+    if isinstance(d.get("payload"), str):
+        try:
+            d["payload"] = json.loads(d["payload"])
+        except (TypeError, ValueError):
+            d["payload"] = {}
+    if d.get("created_at") is not None:
+        d["created_at"] = d["created_at"].isoformat()
+    return d
+
+
+async def insert_agent_action(data: dict) -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        f"""
+        INSERT INTO agent_actions
+            (action_id, user_id, agent_type, action_type, payload, session_id, channel)
+        VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        RETURNING {_AGENT_ACTION_COLUMNS}
+        """,
+        data["action_id"],
+        data["user_id"],
+        data["agent_type"],
+        data["action_type"],
+        json.dumps(data.get("payload") or {}),
+        data.get("session_id"),
+        data.get("channel"),
+    )
+    return _row_to_agent_action(row)
+
+
+async def list_agent_actions(
+    user_id: str,
+    action_type: Optional[str] = None,
+    agent_type: Optional[str] = None,
+    limit: int = 50,
+) -> list:
+    pool = await get_pool()
+    conditions = ["user_id = $1"]
+    params: list = [user_id]
+    if action_type:
+        params.append(action_type)
+        conditions.append(f"action_type = ${len(params)}")
+    if agent_type:
+        params.append(agent_type)
+        conditions.append(f"agent_type = ${len(params)}")
+    params.append(limit)
+    where = " AND ".join(conditions)
+    rows = await pool.fetch(
+        f"""
+        SELECT {_AGENT_ACTION_COLUMNS} FROM agent_actions
+        WHERE {where}
+        ORDER BY created_at DESC
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    return [_row_to_agent_action(r) for r in rows]
+
+
+async def count_agent_actions(
+    user_id: str,
+    action_type: Optional[str] = None,
+    agent_type: Optional[str] = None,
+) -> int:
+    pool = await get_pool()
+    conditions = ["user_id = $1"]
+    params: list = [user_id]
+    if action_type:
+        params.append(action_type)
+        conditions.append(f"action_type = ${len(params)}")
+    if agent_type:
+        params.append(agent_type)
+        conditions.append(f"agent_type = ${len(params)}")
+    where = " AND ".join(conditions)
+    return await pool.fetchval(
+        f"SELECT COUNT(*) FROM agent_actions WHERE {where}", *params
+    ) or 0
