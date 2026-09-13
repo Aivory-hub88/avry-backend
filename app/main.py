@@ -120,6 +120,13 @@ except Exception as e:
     print(f"[!] Warning: Could not import assessment leads routes: {e}")
     assessment_leads_router = None
 
+try:
+    from app.routes.mcp_image_downloads import router as mcp_image_downloads_router
+    print("[✓] MCP image download routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import MCP image download routes: {e}")
+    mcp_image_downloads_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -280,6 +287,8 @@ if trap_hits_router:
     app.include_router(trap_hits_router)
 if assessment_leads_router:
     app.include_router(assessment_leads_router)
+if mcp_image_downloads_router:
+    app.include_router(mcp_image_downloads_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")

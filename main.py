@@ -200,6 +200,13 @@ try:
 except Exception as e:
     print(f"[!] Credits routes failed: {e}")
 
+try:
+    from app.routes.mcp_image_downloads import router as mcp_image_downloads_router
+    app.include_router(mcp_image_downloads_router)
+    print("[OK] MCP image download routes registered")
+except Exception as e:
+    print(f"[!] MCP image download routes failed: {e}")
+
 # The container runs THIS file (`python main.py`), not app/main.py, and only
 # app/main.py had ever registered this router — so every free-assessment lead
 # and funnel event POSTed by the landing site hit an unmounted path and came
