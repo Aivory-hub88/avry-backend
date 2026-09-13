@@ -86,6 +86,13 @@ except Exception as e:
     agent_actions_router = None
 
 try:
+    from app.routes.agent_runs import router as agent_runs_router
+    print("[✓] Agent runs routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import agent runs routes: {e}")
+    agent_runs_router = None
+
+try:
     from app.routes.trap_hits import router as trap_hits_router
     print("[✓] Trap hits routes registered")
 except Exception as e:
@@ -261,6 +268,8 @@ if slack_router:
     app.include_router(slack_router)
 if agent_actions_router:
     app.include_router(agent_actions_router)
+if agent_runs_router:
+    app.include_router(agent_runs_router)
 if agent_profiles_router:
     app.include_router(agent_profiles_router)
 if agent_tool_scope_router:

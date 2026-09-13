@@ -29,6 +29,7 @@ import requests
 
 from app.config import settings
 from app.services import tiers
+from app.services import agent_run_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -686,6 +687,7 @@ class TelegramService:
         gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
         if gateway_token:
             headers["X-Internal-Token"] = gateway_token
+        agent_run_tracker.mark_running(binding["user_id"], binding["agent_type"], channel)
         try:
             resp = requests.post(
                 f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/message",
@@ -715,6 +717,8 @@ class TelegramService:
             logger.error(f"Agent gateway returned {resp.status_code}: {resp.text[:200]}")
         except (requests.RequestException, ValueError) as e:
             logger.error(f"Agent gateway error: {e}")
+        finally:
+            agent_run_tracker.clear_running(binding["user_id"], binding["agent_type"])
         return {
             "reply": "⚠️ The agent is temporarily unavailable. Please try again in a moment.",
             "pending_approval": None,
