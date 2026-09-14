@@ -53,6 +53,10 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-profiles"])
 
 AGENT_TYPES = {a["agent_type"] for a in AGENT_ROSTER}
 
+# Canonical first-name identity per agent type (Geno/Teo/Lex/Finn/Ofira),
+# used only as a bridge/Cerveau-facing fallback -- see internal_get().
+AGENT_DEFAULT_NAMES = {a["agent_type"]: a["name"] for a in AGENT_ROSTER}
+
 # Per-field length caps: generous enough for a real business identity, small
 # enough that a profile can't blow up prompt size or hide a jailbreak essay.
 FIELD_CAPS = {
@@ -205,6 +209,21 @@ def internal_get(user_id: str, agent_type: str):
     except Exception as e:
         logger.error(f"profile lookup failed for {user_id}/{agent_type}: {e}")
         raise HTTPException(status_code=503, detail="Profile store unavailable")
+
+    if not (profile and profile.get("agent_name")):
+        # No tenant-set name (the dashboard force-saves agent_name as null,
+        # see components/agents/CustomizeAgentModal.tsx commit 718881f) --
+        # fall back to this agent type's own first-name identity instead of
+        # leaving it blank. vps-bridge's telegram-agent.js already has its
+        # own hardcoded per-type AGENT_PROMPTS fallback and treats an empty
+        # operator_config as a no-op, so this is inert there. Cerveau has no
+        # such fallback and injects agent_name verbatim as prompt data
+        # (docs/CERVEAU-TECHNICAL-REFERENCE.md Sec 2.2) -- without this,
+        # Cerveau-routed tenants got no name at all. Investigated 2026-09-14.
+        default_name = AGENT_DEFAULT_NAMES.get(agent_type)
+        if default_name:
+            profile = {**(profile or {}), "agent_name": default_name}
+
     return {"profile": profile}
 
 
