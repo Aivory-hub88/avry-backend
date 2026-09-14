@@ -28,6 +28,7 @@ from typing import Optional
 import requests
 
 from app.config import settings
+from app.routes.agent_roster import AGENT_ROSTER
 from app.services import tiers
 from app.services import agent_run_tracker
 
@@ -38,14 +39,11 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 LINK_TOKENS_COLLECTION = "telegram_link_tokens"
 BINDINGS_COLLECTION = "telegram_bindings"
 
-# Agent catalog shown on the dashboard Agents page
-AGENT_TYPES = {
-    "autonomous": "Autonomous Agent",
-    "customer_service": "Customer Service Agent",
-    "leads_qualifier": "Leads Qualifier Agent",
-    "finance_invoice_ops": "Finance & Invoice Ops Agent",
-    "office_assistant": "Office Assistant Agent",
-}
+# Agent catalog shown on the dashboard Agents page. Sourced from the
+# canonical roster (app/routes/agent_roster.py) -- this used to hardcode its
+# own titles, which had drifted stale (e.g. "Autonomous Agent" instead of
+# "Generalist Agent") and leaked into user-facing Telegram/Slack copy.
+AGENT_TYPES = {a["agent_type"]: a["title"] for a in AGENT_ROSTER}
 
 # Minimum subscription tier per agent type (operational < business <
 # enterprise; see app/services/tiers.py). Unlisted agents are available on

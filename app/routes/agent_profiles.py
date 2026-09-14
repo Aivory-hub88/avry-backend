@@ -44,13 +44,14 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
+from app.routes.agent_roster import AGENT_ROSTER
 from app.services import attachment_extractor, cerveau_memory
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-profiles"])
 
-AGENT_TYPES = {"autonomous", "customer_service", "leads_qualifier", "finance_invoice_ops", "office_assistant"}
+AGENT_TYPES = {a["agent_type"] for a in AGENT_ROSTER}
 
 # Per-field length caps: generous enough for a real business identity, small
 # enough that a profile can't blow up prompt size or hide a jailbreak essay.
