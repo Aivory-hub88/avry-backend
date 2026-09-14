@@ -47,10 +47,12 @@ import json
 import logging
 import os
 import re
+import secrets
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlsplit
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -494,6 +496,148 @@ def _verify_and_persist(
     if status == "verified":
         return payload
     raise HTTPException(status_code=422, detail={"error": "verification_failed", "reason": error, "server": payload})
+
+
+# ── Odoo self-serve connect (Aivory-hub88/Od-MCP shared server) ────────────
+#
+# Every other custom-MCP registration above asks the tenant to run their own
+# server and paste its URL (docs/ODOO-MCP-SETUP-GUIDE.md's BYO model, still
+# the only path for a truly custom system). Odoo is different now: Aivory
+# runs its own multi-tenant Od-MCP server (odoo-mcp.aivory.uk) that can add
+# a tenant's Odoo instance at runtime with no server restart and no effect
+# on any other tenant's live session (see Od-MCP's `OdooPool.add_instance`
+# and its `/admin/instances` route). So the tenant only ever gives Aivory
+# their own Odoo URL + API key -- no Docker, no reverse proxy, no MCP URL.
+#
+# Isolation is enforced by Od-MCP itself: each tenant here gets a freshly
+# generated bearer token bound ONLY to their own instance
+# (`resolve_tenant` in Od-MCP's tenant.rs), carried as a `?token=` query
+# param on the registered URL rather than an Authorization header, so it
+# never collides with any other auth layer in front of that shared server.
+
+_SHARED_ODOO_MCP_BASE_URL = "https://odoo-mcp.aivory.uk"
+_OD_MCP_ADMIN_TIMEOUT = 15
+
+
+class ConnectOdooRequest(BaseModel):
+    agent_type: str
+    odoo_url: str = Field(min_length=1, max_length=500)
+    # Required, not auto-detected: Odoo has no reliable unauthenticated way
+    # to tell us the database name for a multi-DB instance, and guessing
+    # wrong silently connects the agent to the wrong company's data. The
+    # dashboard's own copy explains where to find it (Settings → General
+    # Settings → Database Name, or the Odoo.sh/OEC.sh dashboard).
+    odoo_db: str = Field(min_length=1, max_length=200)
+    api_key: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("odoo_url")
+    @classmethod
+    def _validate_odoo_url(cls, v: str) -> str:
+        parts = urlsplit(v.strip())
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError("odoo_url must be a valid http(s) URL, e.g. https://yourcompany.odoo.com")
+        return v.strip().rstrip("/")
+
+
+def _od_mcp_admin_token() -> str:
+    token = os.getenv("OD_MCP_ADMIN_TOKEN")
+    if not token:
+        raise HTTPException(status_code=503, detail="Odoo connect is not configured on this deployment.")
+    return token
+
+
+@router.post("/odoo/connect", status_code=201)
+def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user_payload)):
+    """Register the caller's own Odoo (URL + API key) against Aivory's
+    shared Od-MCP server, then run it through the exact same
+    initialize + tools/list verification every other custom MCP server
+    gets (`_verify_and_persist`) -- so a bad api_key or db name surfaces
+    as a normal 'verification failed' reason, not a bespoke error shape,
+    and Od-MCP's real client code (not a re-implementation here) is what
+    actually proves the credentials work."""
+    _check_agent_type(body.agent_type)
+    tier = _require_paid_tier(user["user_id"])
+    _require_cerveau_engine(user["user_id"], body.agent_type)
+    admin_token = _od_mcp_admin_token()
+
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM product.tenant_custom_mcp_servers"
+                " WHERE user_id = %s AND agent_type = %s AND status != 'disabled'",
+                (user["user_id"], body.agent_type),
+            )
+            (active_count,) = cur.fetchone()
+            quota = _MAX_SERVERS_BY_TIER.get(tier, 1)
+            if active_count >= quota:
+                plural = "server" if quota == 1 else "servers"
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Your {tiers.display_name(tier)} plan allows {quota} custom MCP {plural} "
+                        f"per agent. Remove one before connecting another."
+                    ),
+                )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"odoo connect quota check failed for {user['user_id']}: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+
+    # Instance name must be unique per (tenant, agent_type) and satisfy
+    # Od-MCP's own `valid_instance_name` (alnum/-/_ only) -- user_id is
+    # already that shape (`user_<hex>`), agent_type is a fixed enum.
+    instance_name = f"t_{user['user_id']}_{body.agent_type}"[:64]
+    tenant_token = secrets.token_hex(24)
+
+    try:
+        admin_resp = requests.post(
+            f"{_SHARED_ODOO_MCP_BASE_URL}/admin/instances",
+            json={
+                "name": instance_name,
+                "url": body.odoo_url,
+                "db": body.odoo_db,
+                "api_key": body.api_key,
+                "mcpToken": tenant_token,
+            },
+            headers={"X-Admin-Token": admin_token},
+            timeout=_OD_MCP_ADMIN_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        logger.error(f"Od-MCP admin call failed for {user['user_id']}/{body.agent_type}: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach Aivory's Odoo connector service. Please try again.")
+
+    if admin_resp.status_code >= 400:
+        logger.error(f"Od-MCP admin rejected instance add for {user['user_id']}/{body.agent_type}: {admin_resp.status_code} {admin_resp.text[:200]}")
+        raise HTTPException(status_code=502, detail="Could not register your Odoo instance. Please try again.")
+
+    mcp_url = f"{_SHARED_ODOO_MCP_BASE_URL}/mcp?token={tenant_token}"
+
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO product.tenant_custom_mcp_servers
+                    (user_id, agent_type, name, url, transport, auth_header_name, auth_header_value_encrypted)
+                VALUES (%s, %s, %s, %s, %s, NULL, NULL)
+                RETURNING id
+                """,
+                (user["user_id"], body.agent_type, "odoo", mcp_url, "streamable-http"),
+            )
+            (row_id,) = cur.fetchone()
+        conn.commit()
+    except Exception as e:
+        logger.error(f"odoo connect row insert failed for {user['user_id']}: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+
+    return _verify_and_persist(str(row_id), user["user_id"], body.agent_type, mcp_url, None, None)
 
 
 @router.get("")
