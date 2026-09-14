@@ -369,6 +369,22 @@ def upsert_profile(agent_type: str, body: ProfileUpdate, user: dict = Depends(ge
     try:
         _ensure_schema(conn)
         with conn.cursor() as cur:
+            if not values["agent_name"]:
+                # CustomizeAgentModal.tsx force-saves agent_name as null on every
+                # save (agent name is no longer operator-editable, see commit
+                # 718881f) -- fine for legacy, which falls back to AGENT_PROMPTS/
+                # internal_get()'s in-memory default, but Cerveau reads this
+                # column directly with no fallback of its own, so leaving it null
+                # here wipes a cerveau tenant's identity on their very next save.
+                # Investigated 2026-09-14.
+                cur.execute(
+                    "SELECT engine FROM product.agent_profiles WHERE user_id = %s AND agent_type = %s",
+                    (user["user_id"], agent_type),
+                )
+                row = cur.fetchone()
+                if row and row[0] == "cerveau":
+                    values["agent_name"] = AGENT_DEFAULT_NAMES.get(agent_type)
+
             cols = list(values.keys())
             assignments = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols)
             cur.execute(
