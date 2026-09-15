@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     telegram_bot_username: Optional[str] = None  # without @, used to build t.me deep links
     telegram_webhook_secret: Optional[str] = None  # sent back by Telegram as X-Telegram-Bot-Api-Secret-Token
     telegram_link_token_ttl_minutes: int = 10
+    # Public base this backend is reachable at, used to build per-bot webhook
+    # URLs ({base}/api/v1/telegram/webhook/{agent_type}). Matches the live
+    # registration (see Aira's bot webhook) and scripts/set_telegram_webhook.sh.
+    telegram_webhook_base_url: str = "https://backend.aivory.id"
     # Optional downstream gateway that answers agent messages (e.g. zeroclaw bridge).
     # When unset, bound chats get a static acknowledgement reply.
     telegram_agent_gateway_url: Optional[str] = None

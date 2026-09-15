@@ -280,6 +280,60 @@ class TelegramService:
             pass
 
     # ========================================================================
+    # WEBHOOK SELF-REGISTRATION (kills the setWebhook tech debt)
+    # ========================================================================
+
+    @staticmethod
+    def webhook_url_for(agent_type: str) -> str:
+        """Expected Bot API webhook URL for an agent's bot."""
+        return (
+            f"{settings.telegram_webhook_base_url.rstrip('/')}"
+            f"/api/v1/telegram/webhook/{agent_type}"
+        )
+
+    def ensure_webhook(self, bot: dict, agent_type: str) -> bool:
+        """Register the bot's webhook if it isn't already correct.
+
+        Called best-effort when a deploy link is minted, so a newly added
+        bot (new TELEGRAM_BOT_TOKEN_<AGENT>) starts receiving updates
+        without an operator running scripts/set_telegram_webhook.sh by
+        hand. Idempotent: getWebhookInfo is checked first and a correct
+        registration is left untouched — notably WITHOUT
+        drop_pending_updates, which would discard queued updates on every
+        deploy-link creation. Never raises; returns False when skipped
+        (no secret configured) or the Bot API call fails.
+        """
+        if not bot:
+            return False
+        if not settings.telegram_webhook_secret:
+            logger.warning("Skipping webhook ensure: TELEGRAM_WEBHOOK_SECRET not configured")
+            return False
+        expected = self.webhook_url_for(agent_type)
+        try:
+            info = requests.get(
+                self._api_url("getWebhookInfo", bot["token"]), timeout=10
+            )
+            if info.ok and (info.json().get("result") or {}).get("url") == expected:
+                return True
+            resp = requests.post(
+                self._api_url("setWebhook", bot["token"]),
+                json={
+                    "url": expected,
+                    "secret_token": settings.telegram_webhook_secret,
+                    "allowed_updates": ["message", "callback_query"],
+                },
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.error(f"setWebhook failed ({resp.status_code}): {resp.text[:200]}")
+                return False
+            logger.info(f"Registered Telegram webhook for '{agent_type}': {expected}")
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Webhook ensure error for '{agent_type}': {e}")
+            return False
+
+    # ========================================================================
     # LINK TOKENS (one-time, expiring)
     # ========================================================================
 
@@ -319,6 +373,15 @@ class TelegramService:
             "chat_id": None,
         }
         self.db.save_json(LINK_TOKENS_COLLECTION, token, record)
+
+        # Self-registration: a fresh bot's webhook is empty until someone
+        # sets it (previously a manual script run). Best-effort and
+        # fail-open — link creation must never break because Telegram's API
+        # hiccuped; the QR still works if the webhook was already correct.
+        try:
+            self.ensure_webhook(bot, agent_type)
+        except Exception as e:  # pragma: no cover - defensive, ensure_webhook already swallows
+            logger.error(f"Unexpected webhook ensure failure for '{agent_type}': {e}")
 
         param = "startgroup" if chat_target == "group" else "start"
         deep_link = f"https://t.me/{bot['username']}?{param}={token}"

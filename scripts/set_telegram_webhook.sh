@@ -21,6 +21,8 @@ AGENTS=(
   "customer_service|Aivory Customer Service Agent — 24/7 support. Just type.|Your Aivory Customer Service Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
   "leads_qualifier|Aivory Leads Qualifier — BANT-qualifies your leads. Just type.|Your Aivory Leads Qualifier Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
   "finance_invoice_ops|Aivory Finance & Invoice Ops — precise invoice automation. Just type.|Your Aivory Finance & Invoice Ops Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
+  "office_assistant|Aivory Office Assistant — summaries and action items. Just type.|Your Aivory Office Assistant lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
+  "chief_of_staff|Aivory Chief of Staff — coordinates your AI team. Just type.|Your Aivory Chief of Staff lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
 )
 
 setup_bot() {
