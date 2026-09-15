@@ -52,14 +52,14 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # (both Trello and Linear wired, not one).
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
-    "leads_qualifier": ["hubspot", "slack", "gmail"],
-    "office_assistant": ["slack", "asana", "erpnext", "gmail", "googlecalendar", "trello", "linear"],
-    "finance_invoice_ops": ["erpnext", "gmail"],
+    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook"],
+    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear"],
+    "finance_invoice_ops": ["erpnext", "gmail", "outlook"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
         "zendesk", "hubspot", "slack", "asana", "erpnext",
-        "gmail", "googlecalendar", "trello", "linear",
+        "gmail", "outlook", "googlecalendar", "trello", "linear",
     ],
 }
 
