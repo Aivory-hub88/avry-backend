@@ -115,7 +115,12 @@ CREATE TABLE IF NOT EXISTS product.tenant_custom_mcp_servers (
     auth_header_name              TEXT,
     auth_header_value_encrypted   BYTEA,
     status                        TEXT NOT NULL DEFAULT 'pending_verification',
-    risk_tier                     TEXT NOT NULL DEFAULT 'irreversible',
+    -- Approval-gate removal (2026-09-17, owner decision): the user's
+    -- explicit instruction IS the approval (draft preview + in-conversation
+    -- confirm, no second ask from the gate). New servers default to 'safe'
+    -- (never park); a server can still be flipped back to 'irreversible'
+    -- per-row if gating is ever wanted again for that system.
+    risk_tier                     TEXT NOT NULL DEFAULT 'safe',
     last_verified_at              TIMESTAMPTZ,
     last_verify_error             TEXT,
     tool_count                    INTEGER,
@@ -143,6 +148,21 @@ _MIGRATE_SQL = """
 ALTER TABLE product.tenant_custom_mcp_servers
     ADD COLUMN IF NOT EXISTS tools_json JSONB NOT NULL DEFAULT '[]',
     ADD COLUMN IF NOT EXISTS disabled_tools TEXT[] NOT NULL DEFAULT '{}';
+"""
+
+# Approval-gate removal (2026-09-17, owner decision): previously 'irreversible'
+# by default, so every tenant-supplied tool parked as Pending even after an
+# explicit user instruction. New default is 'safe' (never park); existing
+# rows still on the old default migrate with it. Idempotent and safe to run
+# on every boot: no route sets risk_tier today, so any 'irreversible' value
+# found here can only be the old default, never a deliberate per-server
+# choice (a dashboard re-gate control would need to exempt itself here).
+_RISK_TIER_MIGRATE_SQL = """
+ALTER TABLE product.tenant_custom_mcp_servers
+    ALTER COLUMN risk_tier SET DEFAULT 'safe';
+UPDATE product.tenant_custom_mcp_servers
+    SET risk_tier = 'safe', updated_at = now()
+    WHERE status != 'disabled' AND risk_tier = 'irreversible';
 """
 
 # The original index (still created by some already-deployed instances of
@@ -180,6 +200,7 @@ def _ensure_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_SQL)
         cur.execute(_MIGRATE_SQL)
+        cur.execute(_RISK_TIER_MIGRATE_SQL)
         cur.execute(_INDEX_MIGRATE_SQL)
     conn.commit()
     _schema_ready = True
