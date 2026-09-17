@@ -54,7 +54,7 @@ from urllib.parse import urlsplit
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.database.db_service import DatabaseService
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
@@ -129,8 +129,6 @@ CREATE TABLE IF NOT EXISTS product.tenant_custom_mcp_servers (
     CONSTRAINT tenant_custom_mcp_servers_risk_tier_check
         CHECK (risk_tier IN ('safe','reversible','irreversible'))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS tenant_custom_mcp_servers_user_agent_name_idx
-    ON product.tenant_custom_mcp_servers (user_id, agent_type, name);
 """
 
 # Per-tool allow/deny (§B8): added after the table above already shipped, so
@@ -145,6 +143,22 @@ _MIGRATE_SQL = """
 ALTER TABLE product.tenant_custom_mcp_servers
     ADD COLUMN IF NOT EXISTS tools_json JSONB NOT NULL DEFAULT '[]',
     ADD COLUMN IF NOT EXISTS disabled_tools TEXT[] NOT NULL DEFAULT '{}';
+"""
+
+# The original index (still created by some already-deployed instances of
+# _SCHEMA_SQL, before this comment existed) was a plain unique index on
+# (user_id, agent_type, name) with no WHERE clause. Combined with `disable`
+# being a soft-delete (status='disabled', row kept for audit), that made a
+# disabled server's name permanently unusable: re-registering the same name
+# — the only name some cards let you pick, e.g. the fixed "aivory-mail" card
+# — always hit the same unique-violation the first registration did, no
+# matter how long ago it was disabled. Drop-then-recreate as a partial index
+# so only non-disabled rows compete for a name; safe to run on every boot.
+_INDEX_MIGRATE_SQL = """
+DROP INDEX IF EXISTS product.tenant_custom_mcp_servers_user_agent_name_idx;
+CREATE UNIQUE INDEX IF NOT EXISTS tenant_custom_mcp_servers_user_agent_name_idx
+    ON product.tenant_custom_mcp_servers (user_id, agent_type, name)
+    WHERE status != 'disabled';
 """
 
 _schema_ready = False
@@ -166,6 +180,7 @@ def _ensure_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(_SCHEMA_SQL)
         cur.execute(_MIGRATE_SQL)
+        cur.execute(_INDEX_MIGRATE_SQL)
     conn.commit()
     _schema_ready = True
 
@@ -327,6 +342,26 @@ class RegisterServerRequest(BaseModel):
         if v not in ("streamable-http", "sse"):
             raise ValueError("transport must be 'streamable-http' or 'sse'")
         return v
+
+    @model_validator(mode="after")
+    def _normalize_auth_header_value(self) -> "RegisterServerRequest":
+        # Authorization is a "<scheme> <credential>" pair (RFC 7235), and
+        # every setup guide we show (Aivory Mail's own settings page included)
+        # tells the operator to enter "Bearer <token>" as the value — but a
+        # bare token is the far easier thing to accidentally paste, and the
+        # dashboard sends whatever lands in this field completely verbatim.
+        # A token-shaped value with no space is *never* a valid Authorization
+        # value on its own, so silently 401ing every such registration (a
+        # perfectly valid token, rejected only because "Bearer " is missing)
+        # is a paste-error tax with no compensating safety benefit.
+        if (
+            self.auth_header_value
+            and self.auth_header_name
+            and self.auth_header_name.strip().lower() == "authorization"
+            and " " not in self.auth_header_value.strip()
+        ):
+            self.auth_header_value = f"Bearer {self.auth_header_value.strip()}"
+        return self
 
 
 _LIST_COLUMNS = (
