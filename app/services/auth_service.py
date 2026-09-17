@@ -29,7 +29,13 @@ except ImportError:
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60      # 1 hour (was 15 min)
-REFRESH_TOKEN_EXPIRE_DAYS = 7
+# Refresh window: 30 days SLIDING (was 7 days absolute). Every successful
+# refresh pushes the server-side session expiry out another 30 days, so an
+# active user never hits a login wall while an idle one ages out — the
+# standard "remember me" shape for a dashboard web app. The short-lived
+# access token stays short on purpose (stolen-token blast radius); only
+# this revocable, server-tracked session lives long.
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 
 def _now() -> datetime:
@@ -324,6 +330,21 @@ class AuthService:
             expires = expires.replace(tzinfo=timezone.utc)
         if _now() > expires:
             raise ValueError("Session expired")
+
+        # Sliding window: activity extends the session another full window.
+        # No rotation (same refresh token back) — rotation without a grace
+        # window logs out sibling tabs/pollers racing the same refresh.
+        new_expires_at = _now() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+        try:
+            if pg_up:
+                await pg.update_session_expiry(session_id, new_expires_at)
+            else:
+                session["expires_at"] = new_expires_at.isoformat()
+                self.db.save_json("sessions", session_id, session)
+        except Exception:
+            # Persistence of the slide must never fail the refresh itself —
+            # worst case the session keeps its previous (still valid) expiry.
+            pass
 
         if pg_up:
             user = await pg.get_user_by_id(user_id)
