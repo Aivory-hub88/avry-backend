@@ -109,35 +109,128 @@ _PENDING_APPROVAL_ID_RE = re.compile(r"^pa_[A-Za-z0-9-]{1,64}$")
 PENDING_COLLECTION = "pending_approvals"
 
 # Short affirmative / negative replies that resolve a waiting approval.
-# Matched against the whole trimmed-lowercased message (max ~12 chars), so a
-# normal sentence that happens to contain "ya" never triggers. Indonesian
-# first (primary users), English as alias.
+# Matched against the whole normalized message (max 24 chars), so a normal
+# sentence that happens to contain "ya" never triggers. Multilingual by
+# design: approval is a protocol, not an Indonesian-only gate. Indonesian
+# first (primary users), then English + major user languages (AR/JA/ZH/ES/
+# FR/DE/PT/NL/RU/TR/HI/KO/IT/TH/VI/TL/MS).
 _APPROVE_WORDS = frozenset({
-    "ya", "y", "yes", "yep", "yeah", "ok", "oke", "okay", "okei",
-    "setuju", "lanjut", "lanjutkan", "kirim", "send", "kirimkan",
-    "gas", "go", "deal", "boleh", "silakan", "silahkan", "iya",
-    "betul", "benar", "konfirmasi", "confirm", "approve", "approved",
-    "acc", "laksanakan", "jalankan", "proses", "ya kirim", "ya lanjut",
-    "ya boleh", "ok kirim", "ok lanjut",
+    # id / ms
+    "ya", "iya", "yoi", "oke", "okei", "setuju", "lanjut", "lanjutkan",
+    "kirim", "kirimkan", "boleh", "silakan", "silahkan", "betul", "benar",
+    "konfirmasi", "acc", "laksanakan", "jalankan", "proses", "gas",
+    "ya kirim", "ya lanjut", "ya boleh", "ok kirim", "ok lanjut",
+    "teruskan", "sila", "baik",
+    # en
+    "y", "yes", "yep", "yeah", "yea", "ok", "okay", "k", "approve",
+    "approved", "confirm", "confirmed", "go", "send", "proceed",
+    "do it", "go ahead", "send it", "yes please", "agreed", "deal",
+    # ar
+    "نعم", "أجل", "اجل", "اوكي", "أوكي", "تمام", "موافق", "أكيد", "اكيد",
+    "ابعت", "أرسل", "ارسل", "نفذ", "توكل", "تابع",
+    # ja
+    "はい", "うん", "オーケー", "了解", "りょうかい", "承知", "承認",
+    "送信", "送って", "進めて", "おねがい", "お願い",
+    # zh
+    "好", "好的", "是", "是的", "对", "可以", "行", "同意", "确认",
+    "发送", "发吧", "继续", "批准", "沒問題", "没问题",
+    # es
+    "sí", "si", "vale", "de acuerdo", "envía", "envia", "enviar",
+    "adelante", "confirma", "confirmado", "dale", "procede",
+    # fr
+    "oui", "d'accord", "daccord", "envoie", "envoyer", "vas-y", "vasy",
+    "confirmer", "approuver", "continue",
+    # de
+    "ja", "okay", "einverstanden", "senden", "weiter", "bestätigen",
+    "bestatigen", "genehmigt", "mach weiter",
+    # pt
+    "sim", "combinado", "envia", "enviar", "vai", "confirmado",
+    "aprovo", "pode enviar", "manda",
+    # nl
+    "ja", "akkoord", "verstuur", "verzenden", "doorgaan", "bevestig",
+    # ru
+    "да", "ок", "хорошо", "согласен", "отправь", "отправить",
+    "продолжай", "подтверди", "давай",
+    # tr
+    "evet", "tamam", "olur", "gönder", "gonder", "devam", "onaylıyorum",
+    "onayliyorum",
+    # hi
+    "हाँ", "हा", "ठीक", "ओके", "भेजो", "भेजें", "आगे बढ़ो",
+    # ko
+    "네", "예", "응", "좋아", "확인", "보내", "진행",
+    # it
+    "sì", "d'accordo", "daccordo", "invia", "vai", "confermo", "procedi",
+    # th
+    "ใช่", "ครับ", "ค่ะ", "คะ", "โอเค", "ตกลง", "ส่ง", "ส่งเลย", "ดำเนินการ",
+    # vi
+    "vâng", "vang", "ừ", "u", "đồng ý", "dong y", "gửi", "gui",
+    "gửi đi", "tiếp tục", "xác nhận",
+    # tl
+    "oo", "opo", "sige", "ipadala", "tuloy",
 })
 _DENY_WORDS = frozenset({
-    "tidak", "nggak", "ngga", "gak", "ga", "no", "nope", "cancel",
-    "batal", "batalkan", "jangan", "jangan kirim", "deny", "tolak",
-    "stop", "gajadi", "gak jadi", "nggak jadi", "tidak jadi",
+    # id / ms
+    "tidak", "nggak", "ngga", "gak", "ga", "batal", "batalkan",
+    "jangan", "jangan kirim", "tolak", "gajadi", "gak jadi",
+    "nggak jadi", "tidak jadi", "jangan dulu",
+    # en
+    "no", "nope", "nah", "n", "cancel", "stop", "don't", "dont",
+    "deny", "denied", "reject", "abort", "do not send", "dont send",
+    # ar
+    "لا", "كلا", "إلغاء", "الغاء", "توقف", "لا ترسل", "مرفوض",
+    # ja
+    "いいえ", "いや", "ダメ", "だめ", "キャンセル", "中止", "停止",
+    "送らないで",
+    # zh
+    "不", "不是", "不行", "不要", "取消", "停止", "别发", "否决", "否",
+    # es
+    "no", "cancela", "cancelar", "para", "no envíes", "no envies",
+    "denegar",
+    # fr
+    "non", "annuler", "stop", "n'envoie pas", "nenvoie pas", "refuser",
+    # de
+    "nein", "nee", "abbrechen", "stopp", "nicht senden", "ablehnen",
+    # pt
+    "não", "nao", "cancela", "cancelar", "para", "não envia", "nao envia",
+    # nl
+    "nee", "annuleren", "niet verzenden",
+    # ru
+    "нет", "отмена", "стоп", "не надо", "не отправляй",
+    # tr
+    "hayır", "hayir", "iptal", "dur", "gönderme", "gonderme",
+    # hi
+    "नहीं", "नही", "रद्द", "रोको", "मत भेजो",
+    # ko
+    "아니", "아니요", "취소", "그만", "보내지마",
+    # it
+    "annulla", "ferma", "non inviare",
+    # th
+    "ไม่", "ไม่ใช่", "ยกเลิก", "หยุด", "ไม่ส่ง",
+    # vi
+    "không", "khong", "hủy", "huy", "dừng", "dung", "đừng gửi", "dung gui",
+    "từ chối", "tu choi",
+    # tl
+    "hindi", "huwag", "kansela",
 })
 
-_APPROVAL_HINT = "\n\nBalas Ya untuk lanjut, atau Batal untuk membatalkan."
+# Bilingual hint — the agent already asks in the user's language; this line
+# just teaches the protocol shape once per pending turn.
+_APPROVAL_HINT = "\n\nBalas Ya / Reply Yes untuk lanjut, atau Batal / No untuk membatalkan."
 
 
 def parse_approval_text(text: str) -> Optional[str]:
     """Map a short user reply to 'approve' / 'deny', else None.
 
-    Strict: whole message must be a known word/phrase (after lowercasing,
-    stripping punctuation). Anything longer than a confirmation is a normal
-    chat message and must NOT resolve an approval.
+    Multilingual + strict: whole message must be a known word/phrase (after
+    NFKC + casefold, collapsing whitespace, stripping punctuation incl.
+    CJK/AR marks). Anything longer than a confirmation is a normal chat
+    message and must NOT resolve an approval.
     """
-    t = (text or "").strip().lower()
-    t = re.sub(r"\s+", " ", t).strip(" .!?,;:'\"()")
+    import unicodedata
+
+    t = unicodedata.normalize("NFKC", text or "")
+    t = t.strip().casefold()
+    t = re.sub(r"\s+", " ", t).strip(" .!?,;:'\"()。、？！「」『』<>‹›«»-–—")
     if not t or len(t) > 24:
         return None
     if t in _APPROVE_WORDS:
@@ -755,7 +848,7 @@ class TelegramService:
         if pending and isinstance(pending, dict) and pending.get("id"):
             self._save_waiting_pending(binding, pending)
             reply = result.get("reply") or ""
-            if "Balas Ya untuk lanjut" not in reply:
+            if "Balas Ya" not in reply and "Reply Yes" not in reply:
                 result["reply"] = (reply + _APPROVAL_HINT)[:4096]
         return result
 
