@@ -977,8 +977,12 @@ class TelegramService:
                     "agent_type": binding["agent_type"],
                     "account_type": binding.get("account_type", "free"),
                     "chat_id": binding["chat_id"],
-                    # unique per (bot, chat) so agent histories never merge
-                    "session_id": binding.get("binding_id") or str(binding["chat_id"]),
+                    # Room turns share one session across agents (console
+                    # pseudo-bindings carry room_session_id); everywhere else
+                    # the binding stays the session so histories never merge.
+                    "session_id": binding.get("room_session_id")
+                    or binding.get("binding_id")
+                    or str(binding["chat_id"]),
                     "text": text,
                     "channel": channel,
                 },
@@ -1012,6 +1016,15 @@ class TelegramService:
         No chat binding involved — the console session id keeps agent history
         separate from any Telegram/Slack chats of the same agent.
 
+        Room sessions are SHARED across the agents answering the same
+        conversation (`room_session_id` has no agent_type segment): one room
+        round used to fan out into per-agent sessions
+        (`console_{user}_{agent}_{conversation}`), so Aira's parent row and
+        the specialists' child rows landed in different ledger buckets and
+        the Mission Timeline could never group them. `binding_id` stays
+        per-agent (history pointers and per-agent pending approvals must
+        not merge); only the downstream turn/ledger session is shared.
+
         Conversational protocol applies here too: while an approval waits for
         this console session, a short "Ya"/"Batal" reply resolves it directly
         without an LLM roundtrip. The frontend renders no buttons — it just
@@ -1024,6 +1037,7 @@ class TelegramService:
             "agent_type": agent_type,
             "chat_id": 0,
             "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
+            "room_session_id": f"console_{user['user_id']}_{conversation_id or 'default'}",
         }
         handled = self._try_conversational_approval(pseudo_binding, text or "")
         if handled is not None:
