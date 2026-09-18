@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -100,23 +101,151 @@ def is_valid_token_format(token: str) -> bool:
 # `is_valid_token_format` above for deploy-link tokens.
 _PENDING_APPROVAL_ID_RE = re.compile(r"^pa_[A-Za-z0-9-]{1,64}$")
 
-# appr:{pending_id}:approve|deny — well under Telegram's 64-byte
-# callback_data cap even at the id's max validated length (5 + 64 + 1 + 7 = 77
-# is the theoretical worst case, but real ids are 39 chars: 5+39+1+7=52).
+# Approval is a conversational protocol, not a button gate.
+# When the agent parks an irreversible tool call, it asks in plain language
+# and the user's next short reply ("Ya", "OK", "Kirim", ...) IS the decision.
+# Buttons are gone — this is the only place they used to be built, kept as a
+# no-op for backward compat with already-sent messages.
+PENDING_COLLECTION = "pending_approvals"
+
+# Short affirmative / negative replies that resolve a waiting approval.
+# Matched against the whole normalized message (max 24 chars), so a normal
+# sentence that happens to contain "ya" never triggers. Multilingual by
+# design: approval is a protocol, not an Indonesian-only gate. Indonesian
+# first (primary users), then English + major user languages (AR/JA/ZH/ES/
+# FR/DE/PT/NL/RU/TR/HI/KO/IT/TH/VI/TL/MS).
+_APPROVE_WORDS = frozenset({
+    # id / ms
+    "ya", "iya", "yoi", "oke", "okei", "setuju", "lanjut", "lanjutkan",
+    "kirim", "kirimkan", "boleh", "silakan", "silahkan", "betul", "benar",
+    "konfirmasi", "acc", "laksanakan", "jalankan", "proses", "gas",
+    "ya kirim", "ya lanjut", "ya boleh", "ok kirim", "ok lanjut",
+    "teruskan", "sila", "baik",
+    # en
+    "y", "yes", "yep", "yeah", "yea", "ok", "okay", "k", "approve",
+    "approved", "confirm", "confirmed", "go", "send", "proceed",
+    "do it", "go ahead", "send it", "yes please", "agreed", "deal",
+    # ar
+    "نعم", "أجل", "اجل", "اوكي", "أوكي", "تمام", "موافق", "أكيد", "اكيد",
+    "ابعت", "أرسل", "ارسل", "نفذ", "توكل", "تابع",
+    # ja
+    "はい", "うん", "オーケー", "了解", "りょうかい", "承知", "承認",
+    "送信", "送って", "進めて", "おねがい", "お願い",
+    # zh
+    "好", "好的", "是", "是的", "对", "可以", "行", "同意", "确认",
+    "发送", "发吧", "继续", "批准", "沒問題", "没问题",
+    # es
+    "sí", "si", "vale", "de acuerdo", "envía", "envia", "enviar",
+    "adelante", "confirma", "confirmado", "dale", "procede",
+    # fr
+    "oui", "d'accord", "daccord", "envoie", "envoyer", "vas-y", "vasy",
+    "confirmer", "approuver", "continue",
+    # de
+    "ja", "okay", "einverstanden", "senden", "weiter", "bestätigen",
+    "bestatigen", "genehmigt", "mach weiter",
+    # pt
+    "sim", "combinado", "envia", "enviar", "vai", "confirmado",
+    "aprovo", "pode enviar", "manda",
+    # nl
+    "ja", "akkoord", "verstuur", "verzenden", "doorgaan", "bevestig",
+    # ru
+    "да", "ок", "хорошо", "согласен", "отправь", "отправить",
+    "продолжай", "подтверди", "давай",
+    # tr
+    "evet", "tamam", "olur", "gönder", "gonder", "devam", "onaylıyorum",
+    "onayliyorum",
+    # hi
+    "हाँ", "हा", "ठीक", "ओके", "भेजो", "भेजें", "आगे बढ़ो",
+    # ko
+    "네", "예", "응", "좋아", "확인", "보내", "진행",
+    # it
+    "sì", "d'accordo", "daccordo", "invia", "vai", "confermo", "procedi",
+    # th
+    "ใช่", "ครับ", "ค่ะ", "คะ", "โอเค", "ตกลง", "ส่ง", "ส่งเลย", "ดำเนินการ",
+    # vi
+    "vâng", "vang", "ừ", "u", "đồng ý", "dong y", "gửi", "gui",
+    "gửi đi", "tiếp tục", "xác nhận",
+    # tl
+    "oo", "opo", "sige", "ipadala", "tuloy",
+})
+_DENY_WORDS = frozenset({
+    # id / ms
+    "tidak", "nggak", "ngga", "gak", "ga", "batal", "batalkan",
+    "jangan", "jangan kirim", "tolak", "gajadi", "gak jadi",
+    "nggak jadi", "tidak jadi", "jangan dulu",
+    # en
+    "no", "nope", "nah", "n", "cancel", "stop", "don't", "dont",
+    "deny", "denied", "reject", "abort", "do not send", "dont send",
+    # ar
+    "لا", "كلا", "إلغاء", "الغاء", "توقف", "لا ترسل", "مرفوض",
+    # ja
+    "いいえ", "いや", "ダメ", "だめ", "キャンセル", "中止", "停止",
+    "送らないで",
+    # zh
+    "不", "不是", "不行", "不要", "取消", "停止", "别发", "否决", "否",
+    # es
+    "no", "cancela", "cancelar", "para", "no envíes", "no envies",
+    "denegar",
+    # fr
+    "non", "annuler", "stop", "n'envoie pas", "nenvoie pas", "refuser",
+    # de
+    "nein", "nee", "abbrechen", "stopp", "nicht senden", "ablehnen",
+    # pt
+    "não", "nao", "cancela", "cancelar", "para", "não envia", "nao envia",
+    # nl
+    "nee", "annuleren", "niet verzenden",
+    # ru
+    "нет", "отмена", "стоп", "не надо", "не отправляй",
+    # tr
+    "hayır", "hayir", "iptal", "dur", "gönderme", "gonderme",
+    # hi
+    "नहीं", "नही", "रद्द", "रोको", "मत भेजो",
+    # ko
+    "아니", "아니요", "취소", "그만", "보내지마",
+    # it
+    "annulla", "ferma", "non inviare",
+    # th
+    "ไม่", "ไม่ใช่", "ยกเลิก", "หยุด", "ไม่ส่ง",
+    # vi
+    "không", "khong", "hủy", "huy", "dừng", "dung", "đừng gửi", "dung gui",
+    "từ chối", "tu choi",
+    # tl
+    "hindi", "huwag", "kansela",
+})
+
+# Bilingual hint — the agent already asks in the user's language; this line
+# just teaches the protocol shape once per pending turn.
+_APPROVAL_HINT = "\n\nBalas Ya / Reply Yes untuk lanjut, atau Batal / No untuk membatalkan."
+
+
+def parse_approval_text(text: str) -> Optional[str]:
+    """Map a short user reply to 'approve' / 'deny', else None.
+
+    Multilingual + strict: whole message must be a known word/phrase (after
+    NFKC + casefold, collapsing whitespace, stripping punctuation incl.
+    CJK/AR marks). Anything longer than a confirmation is a normal chat
+    message and must NOT resolve an approval.
+    """
+    import unicodedata
+
+    t = unicodedata.normalize("NFKC", text or "")
+    t = t.strip().casefold()
+    t = re.sub(r"\s+", " ", t).strip(" .!?,;:'\"()。、？！「」『』<>‹›«»-–—")
+    if not t or len(t) > 24:
+        return None
+    if t in _APPROVE_WORDS:
+        return "approve"
+    if t in _DENY_WORDS:
+        return "deny"
+    return None
+
+
+# appr:{pending_id}:approve|deny — kept only so taps on OLD already-sent
+# button messages still resolve instead of dying silently. New turns never
+# render buttons (see _handle_message — protocol text instead).
 def _approval_keyboard(pending_approval: Optional[dict]) -> Optional[dict]:
-    """Build a Telegram inline keyboard for a pending approval, or None."""
-    if not pending_approval or not isinstance(pending_approval, dict):
-        return None
-    pending_id = pending_approval.get("id")
-    if not pending_id or not _PENDING_APPROVAL_ID_RE.match(pending_id):
-        logger.error(f"Refusing to render approval keyboard for malformed pending_id: {pending_id!r}")
-        return None
-    return {
-        "inline_keyboard": [[
-            {"text": "✅ Approve", "callback_data": f"appr:{pending_id}:approve"},
-            {"text": "❌ Deny", "callback_data": f"appr:{pending_id}:deny"},
-        ]]
-    }
+    """Deprecated: approval is conversational now. Always None."""
+    return None
 
 
 def load_user_record(db, user_id: str) -> Optional[dict]:
@@ -280,6 +409,60 @@ class TelegramService:
             pass
 
     # ========================================================================
+    # WEBHOOK SELF-REGISTRATION (kills the setWebhook tech debt)
+    # ========================================================================
+
+    @staticmethod
+    def webhook_url_for(agent_type: str) -> str:
+        """Expected Bot API webhook URL for an agent's bot."""
+        return (
+            f"{settings.telegram_webhook_base_url.rstrip('/')}"
+            f"/api/v1/telegram/webhook/{agent_type}"
+        )
+
+    def ensure_webhook(self, bot: dict, agent_type: str) -> bool:
+        """Register the bot's webhook if it isn't already correct.
+
+        Called best-effort when a deploy link is minted, so a newly added
+        bot (new TELEGRAM_BOT_TOKEN_<AGENT>) starts receiving updates
+        without an operator running scripts/set_telegram_webhook.sh by
+        hand. Idempotent: getWebhookInfo is checked first and a correct
+        registration is left untouched — notably WITHOUT
+        drop_pending_updates, which would discard queued updates on every
+        deploy-link creation. Never raises; returns False when skipped
+        (no secret configured) or the Bot API call fails.
+        """
+        if not bot:
+            return False
+        if not settings.telegram_webhook_secret:
+            logger.warning("Skipping webhook ensure: TELEGRAM_WEBHOOK_SECRET not configured")
+            return False
+        expected = self.webhook_url_for(agent_type)
+        try:
+            info = requests.get(
+                self._api_url("getWebhookInfo", bot["token"]), timeout=10
+            )
+            if info.ok and (info.json().get("result") or {}).get("url") == expected:
+                return True
+            resp = requests.post(
+                self._api_url("setWebhook", bot["token"]),
+                json={
+                    "url": expected,
+                    "secret_token": settings.telegram_webhook_secret,
+                    "allowed_updates": ["message", "callback_query"],
+                },
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.error(f"setWebhook failed ({resp.status_code}): {resp.text[:200]}")
+                return False
+            logger.info(f"Registered Telegram webhook for '{agent_type}': {expected}")
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Webhook ensure error for '{agent_type}': {e}")
+            return False
+
+    # ========================================================================
     # LINK TOKENS (one-time, expiring)
     # ========================================================================
 
@@ -319,6 +502,15 @@ class TelegramService:
             "chat_id": None,
         }
         self.db.save_json(LINK_TOKENS_COLLECTION, token, record)
+
+        # Self-registration: a fresh bot's webhook is empty until someone
+        # sets it (previously a manual script run). Best-effort and
+        # fail-open — link creation must never break because Telegram's API
+        # hiccuped; the QR still works if the webhook was already correct.
+        try:
+            self.ensure_webhook(bot, agent_type)
+        except Exception as e:  # pragma: no cover - defensive, ensure_webhook already swallows
+            logger.error(f"Unexpected webhook ensure failure for '{agent_type}': {e}")
 
         param = "startgroup" if chat_target == "group" else "start"
         deep_link = f"https://t.me/{bot['username']}?{param}={token}"
@@ -499,7 +691,8 @@ class TelegramService:
             self.send_message(bot, chat_id, "No agent is connected to this chat.")
 
     # ========================================================================
-    # APPROVE/DENY BUTTON TAPS (Cerveau F-1-for-approvals, Part B)
+    # LEGACY BUTTON TAPS — kept so old button messages still resolve.
+    # New turns never render buttons; approval is conversational text.
     # ========================================================================
 
     def _handle_callback(self, callback_query: dict, bot: dict) -> None:
@@ -539,6 +732,8 @@ class TelegramService:
             return
 
         result = self._resolve_approval(binding, pending_id, decision)
+        if result.get("outcome"):
+            self._clear_waiting_pending(binding)
         self.send_message(bot, chat_id, result["reply"])
 
         # Only strip the buttons once the row has actually moved out of
@@ -549,7 +744,11 @@ class TelegramService:
             self.edit_message_reply_markup(bot, chat_id, message_id)
 
     def _resolve_approval(self, binding: dict, pending_id: str, decision: str) -> dict:
-        """Forward an approve/deny tap to the agent gateway.
+        """Forward an approve/deny decision to the agent gateway.
+
+        Called from button taps (legacy) AND from conversational replies
+        ("Ya"/"Batal" — the protocol). Retries the 404 race where Cerveau's
+        own SQLite can't yet read the row it just created.
 
         Returns {"reply": str, "outcome": str | None} — outcome is None on
         credit exhaustion or a gateway error (nothing was actually resolved).
@@ -560,39 +759,116 @@ class TelegramService:
         gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
         if gateway_token:
             headers["X-Internal-Token"] = gateway_token
-        try:
-            resp = requests.post(
-                f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/approval-decision",
-                headers=headers,
-                json={
-                    "user_id": binding["user_id"],
-                    "agent_type": binding["agent_type"],
-                    "session_id": binding.get("binding_id") or str(binding["chat_id"]),
-                    "pending_id": pending_id,
-                    "decision": decision,
-                },
-                # Same headroom reasoning as _route_to_agent — a continuation
-                # turn is a real LLM call, same latency class as a normal one.
-                timeout=195,
-            )
-            if resp.ok:
-                data = resp.json()
-                return {
-                    "reply": (data.get("reply_text") or "Done.")[:4096],
-                    "outcome": data.get("outcome"),
-                }
-            if resp.status_code == 404:
-                return {
-                    "reply": "⚠️ This approval request could no longer be found — it may have already expired or been resolved.",
-                    "outcome": None,
-                }
-            logger.error(f"Approval-decision gateway returned {resp.status_code}: {resp.text[:200]}")
-        except (requests.RequestException, ValueError) as e:
-            logger.error(f"Approval-decision gateway error: {e}")
+        payload = {
+            "user_id": binding["user_id"],
+            "agent_type": binding["agent_type"],
+            "session_id": binding.get("room_session_id")
+                    or binding.get("binding_id")
+                    or str(binding["chat_id"]),
+            "pending_id": pending_id,
+            "decision": decision,
+        }
+        url = f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/approval-decision"
+        # Same headroom reasoning as _route_to_agent — a continuation
+        # turn is a real LLM call, same latency class as a normal one.
+        # Plus short-backoff retries absorbing Cerveau's SQLite
+        # read-after-write race (row visible in chat microseconds before
+        # the gateway's own read finds it).
+        for attempt in range(4):
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=195)
+                if resp.ok:
+                    data = resp.json()
+                    return {
+                        "reply": (data.get("reply_text") or "Done.")[:4096],
+                        "outcome": data.get("outcome"),
+                    }
+                if resp.status_code == 404 and attempt < 3:
+                    time.sleep((0.4, 0.8, 1.6)[attempt])
+                    continue
+                if resp.status_code == 404:
+                    return {
+                        "reply": "⚠️ Permintaan persetujuan ini sudah tidak ditemukan — mungkin sudah kedaluwarsa atau sudah diproses.",
+                        "outcome": None,
+                    }
+                logger.error(f"Approval-decision gateway returned {resp.status_code}: {resp.text[:200]}")
+            except (requests.RequestException, ValueError) as e:
+                logger.error(f"Approval-decision gateway error: {e}")
+                if attempt < 3:
+                    time.sleep((0.4, 0.8, 1.6)[attempt])
+                    continue
+            break
         return {
-            "reply": "⚠️ Couldn't process that right now. Please try tapping the button again in a moment.",
+            "reply": "⚠️ Belum bisa diproses sekarang. Coba balas sekali lagi sesaat lagi.",
             "outcome": None,
         }
+
+    # -- Conversational approval protocol state ---------------------------
+    def _pending_key(self, binding: dict) -> str:
+        return str(binding.get("binding_id") or binding.get("chat_id"))
+
+    def _get_waiting_pending(self, binding: dict) -> Optional[dict]:
+        try:
+            rec = self.db.load_json(PENDING_COLLECTION, self._pending_key(binding))
+        except Exception:
+            return None
+        if not rec or not rec.get("pending_id"):
+            return None
+        if not _PENDING_APPROVAL_ID_RE.match(rec["pending_id"]):
+            return None
+        return rec
+
+    def _save_waiting_pending(self, binding: dict, pending_approval: Optional[dict]) -> None:
+        key = self._pending_key(binding)
+        if not pending_approval or not isinstance(pending_approval, dict):
+            return
+        pid = pending_approval.get("id")
+        if not pid or not _PENDING_APPROVAL_ID_RE.match(pid):
+            return
+        try:
+            self.db.save_json(PENDING_COLLECTION, key, {
+                "pending_id": pid,
+                "tool_name": pending_approval.get("tool_name"),
+                "created_at": datetime.utcnow().isoformat(),
+            })
+        except Exception as e:
+            logger.error(f"pending-approval save failed: {e}")
+
+    def _clear_waiting_pending(self, binding: dict) -> None:
+        try:
+            self.db.delete_json(PENDING_COLLECTION, self._pending_key(binding))
+        except Exception:
+            pass
+
+    def _remember_pending_result(self, binding: dict, result: dict) -> dict:
+        """Persist/clear waiting-approval state and append the protocol hint.
+
+        The agent asks in plain language; the reply carries a one-line hint
+        instead of buttons. Returns the (possibly modified) result dict.
+        """
+        pending = (result or {}).get("pending_approval")
+        if pending and isinstance(pending, dict) and pending.get("id"):
+            self._save_waiting_pending(binding, pending)
+            reply = result.get("reply") or ""
+            if "Balas Ya" not in reply and "Reply Yes" not in reply:
+                result["reply"] = (reply + _APPROVAL_HINT)[:4096]
+        return result
+
+    def _try_conversational_approval(self, binding: dict, text: str) -> Optional[dict]:
+        """If a pending approval waits and `text` is Ya/Batal-class, resolve it.
+
+        Returns {"reply": str} on handled, None when this is a normal message.
+        """
+        decision = parse_approval_text(text)
+        if not decision:
+            return None
+        waiting = self._get_waiting_pending(binding)
+        if not waiting:
+            return None
+        result = self._resolve_approval(binding, waiting["pending_id"], decision)
+        if result.get("outcome"):
+            self._clear_waiting_pending(binding)
+        return {"reply": result["reply"], "pending_approval": None}
 
     def _handle_message(self, chat_id: int, message: dict, bot: dict) -> None:
         binding = self.get_binding(bot, chat_id)
@@ -607,13 +883,21 @@ class TelegramService:
             self.send_message(bot, chat_id, "⚠️ This agent was disconnected because the Aivory subscription is no longer active.")
             return
 
+        raw_text = (message.get("text") or message.get("caption") or "").strip()
+        # Protocol first: a short "Ya"/"Batal" while an approval waits IS the
+        # decision — no LLM roundtrip, no buttons to tap.
+        if raw_text and not message.get("document") and not message.get("photo"):
+            handled = self._try_conversational_approval(binding, raw_text)
+            if handled is not None:
+                self.send_message(bot, chat_id, handled["reply"])
+                return
+
         self.send_typing(bot, chat_id)
         prompt = self._build_prompt(bot, message)
         if not prompt:
             return  # nothing readable (e.g. unsupported file with no caption)
-        result = self._route_to_agent(binding, prompt)
-        reply_markup = _approval_keyboard(result.get("pending_approval"))
-        self.send_message(bot, chat_id, result["reply"], reply_markup=reply_markup)
+        result = self._remember_pending_result(binding, self._route_to_agent(binding, prompt))
+        self.send_message(bot, chat_id, result["reply"])
 
     # ------------------------------------------------------------------
     # Attachment handling
@@ -696,7 +980,9 @@ class TelegramService:
                     "account_type": binding.get("account_type", "free"),
                     "chat_id": binding["chat_id"],
                     # unique per (bot, chat) so agent histories never merge
-                    "session_id": binding.get("binding_id") or str(binding["chat_id"]),
+                    "session_id": binding.get("room_session_id")
+                    or binding.get("binding_id")
+                    or str(binding["chat_id"]),
                     "text": text,
                     "channel": channel,
                 },
@@ -728,11 +1014,21 @@ class TelegramService:
         """Talk to a deployable agent from the dashboard AI Console.
 
         No chat binding involved — the console session id keeps agent history
-        separate from any Telegram/Slack chats of the same agent. Returns the
-        full {"reply", "pending_approval"} dict — the console now renders its
-        own Approve/Deny buttons from `pending_approval` and resolves through
-        the existing /api/v1/agent-approvals endpoint, the same one the
-        dashboard's Approvals page uses.
+        separate from any Telegram/Slack chats of the same agent.
+
+        Room sessions are SHARED across the agents answering the same
+        conversation (`room_session_id` has no agent_type segment): one room
+        round used to fan out into per-agent sessions, so Aira's parent row
+        and the specialists' child rows landed in different ledger buckets.
+        `binding_id` stays per-agent (history pointers, per-agent pending
+        approvals); only the downstream turn/ledger session is shared. The
+        approval-decision continuation uses the same shared session.
+
+        Conversational protocol applies here too: while an approval waits for
+        this console session, a short "Ya"/"Batal" reply resolves it directly
+        without an LLM roundtrip. The frontend renders no buttons — it just
+        shows the reply text (which carries the "Balas Ya..." hint) and sends
+        the user's next message back here.
         """
         pseudo_binding = {
             "user_id": user["user_id"],
@@ -740,5 +1036,11 @@ class TelegramService:
             "agent_type": agent_type,
             "chat_id": 0,
             "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
+            "room_session_id": f"console_{user['user_id']}_{conversation_id or 'default'}",
         }
-        return self._route_to_agent(pseudo_binding, text, channel="console")
+        handled = self._try_conversational_approval(pseudo_binding, text or "")
+        if handled is not None:
+            return handled
+        return self._remember_pending_result(
+            pseudo_binding, self._route_to_agent(pseudo_binding, text, channel="console")
+        )

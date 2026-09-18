@@ -33,6 +33,7 @@ Security contract:
     even asks for.
 """
 
+import asyncio
 import logging
 import os
 from typing import List, Optional
@@ -92,12 +93,12 @@ def _agent_types_for_user(user_id: str) -> List[str]:
         conn.close()
 
 
-async def _fetch_pending(client: httpx.AsyncClient, base: str, user_id: str, agent_type: str) -> list:
+async def _fetch_pending(client: httpx.AsyncClient, base: str, user_id: str, agent_type: str, secret: str) -> list:
     res = await client.get(
         f"{base}/webhook/approvals",
         params={"status": "pending"},
         headers={
-            "X-Webhook-Secret": _webhook_secret(),
+            "X-Webhook-Secret": secret,
             "X-Tenant-Id": user_id,
             "X-Agent-Type": agent_type,
         },
@@ -120,12 +121,18 @@ async def list_pending_approvals(user: dict = Depends(get_current_user_payload))
     if not agent_types:
         return {"approvals": []}
 
+    # Resolved once, outside the per-base/per-agent-type loop below: a
+    # missing/misconfigured secret is a real config error and must
+    # surface as one, not get caught by that loop's per-lookup
+    # try/except and silently read as "0 pending approvals".
+    secret = _webhook_secret()
+
     out = []
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         for base in _CERVEAU_BASES:
             for agent_type in agent_types:
                 try:
-                    rows = await _fetch_pending(client, base, user_id, agent_type)
+                    rows = await _fetch_pending(client, base, user_id, agent_type, secret)
                     for row in rows:
                         row["_gateway_base"] = base
                         row["_agent_type"] = agent_type
@@ -175,6 +182,35 @@ async def _resolve_on(client: httpx.AsyncClient, base: str, approval_id: str,
     return res.json()
 
 
+# A pending row can be visible to the dashboard (it rendered the card from
+# the same send-message response that created it) microseconds before a
+# same-process, same-connection SQLite read on Cerveau's side would find it —
+# observed live 2026-09-17: a resolve fired the instant a card appeared 404'd
+# four times in ~6ms, and an unrelated later resolve for the same id succeeded
+# 53s on. Rather than chase that timing window inside Cerveau tonight, absorb
+# it here: a handful of short-backoff retries around the whole candidate scan
+# turns "click did nothing, approval stuck forever" into "resolves a beat
+# late" for the one case that matters — a real race, not a wrong tenant/id.
+_RESOLVE_RETRY_DELAYS_SECONDS = (0.4, 0.8, 1.6)
+
+
+async def _scan_candidates(
+    client: httpx.AsyncClient, candidates: list[tuple[str, str]],
+    approval_id: str, user_id: str, decision: str,
+) -> Optional[dict]:
+    for base, agent_type in candidates:
+        try:
+            result = await _resolve_on(client, base, approval_id, user_id, agent_type, decision)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("resolve attempt failed on %s/%s: %s", base, agent_type, e)
+            continue
+        if result is not None:
+            return result
+    return None
+
+
 @router.post("/{approval_id}/resolve")
 async def resolve_approval(approval_id: str, body: ApprovalDecision,
                             user: dict = Depends(get_current_user_payload)):
@@ -188,23 +224,27 @@ async def resolve_approval(approval_id: str, body: ApprovalDecision,
     if not user_id:
         raise HTTPException(status_code=401, detail="No user id in session")
 
-    candidates = []
     if body.gateway_base and body.agent_type:
         candidates = [(body.gateway_base, body.agent_type)]
+    elif body.agent_type:
+        # Narrowed to the one agent that actually parked this approval — the
+        # dashboard always knows this even when it doesn't know which of the
+        # two HA instances created the row, so this is the common case, not
+        # the fallback.
+        candidates = [(base, body.agent_type) for base in _CERVEAU_BASES]
     else:
         agent_types = _agent_types_for_user(user_id)
         candidates = [(base, at) for base in _CERVEAU_BASES for at in agent_types]
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
-        for base, agent_type in candidates:
-            try:
-                result = await _resolve_on(client, base, approval_id, user_id, agent_type, body.decision)
-            except HTTPException:
-                raise
-            except Exception as e:  # noqa: BLE001
-                logger.warning("resolve attempt failed on %s/%s: %s", base, agent_type, e)
-                continue
-            if result is not None:
-                return {"success": True, "outcome": result.get("outcome"), "reply": result.get("reply_text")}
+        result = await _scan_candidates(client, candidates, approval_id, user_id, body.decision)
+        if result is None:
+            for delay in _RESOLVE_RETRY_DELAYS_SECONDS:
+                await asyncio.sleep(delay)
+                result = await _scan_candidates(client, candidates, approval_id, user_id, body.decision)
+                if result is not None:
+                    break
+        if result is not None:
+            return {"success": True, "outcome": result.get("outcome"), "reply": result.get("reply_text")}
 
     raise HTTPException(status_code=404, detail="Approval not found, not yours, or already resolved")

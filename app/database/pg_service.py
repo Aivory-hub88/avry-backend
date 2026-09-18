@@ -473,6 +473,18 @@ async def delete_session(session_id: str) -> bool:
     return result == "DELETE 1"
 
 
+async def update_session_expiry(session_id: str, expires_at) -> None:
+    """Slide a session's expiry out (refresh-window renewal)."""
+    pool = await get_pool()
+    if hasattr(expires_at, 'tzinfo') and expires_at.tzinfo is None:
+        from datetime import timezone
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    await pool.execute(
+        "UPDATE sessions SET expires_at = $2 WHERE id = $1",
+        session_id, expires_at,
+    )
+
+
 async def get_user_from_refresh_token(refresh_token: str) -> Optional[dict]:
     """Return user row for a given refresh token."""
     pool = await get_pool()

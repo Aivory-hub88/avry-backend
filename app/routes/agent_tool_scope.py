@@ -50,16 +50,22 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # (docs/CERVEAU-TOOLKIT-EXPANSION-PLAN.md): closes the blueprintPlanner
 # Email/Calendar default gaps + ADR-007's Product-tracking open decision
 # (both Trello and Linear wired, not one).
+# Tier-2 Lex outbound added 2026-09-16 (docs/CERVEAU-TIER2-BYO-PLAN.md):
+# Smartlead/Prospeo/MillionVerifier are pure BYO API keys via Composio
+# custom auth configs (same shape as ERPNext). All sends gate behind F-1
+# pending approvals (irreversible). Requires Composio-side auth config +
+# MCP server provisioning before the gate has anything to grant.
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
-    "leads_qualifier": ["hubspot", "slack", "gmail"],
-    "office_assistant": ["slack", "asana", "erpnext", "gmail", "googlecalendar", "trello", "linear"],
-    "finance_invoice_ops": ["erpnext", "gmail"],
+    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify"],
+    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear"],
+    "finance_invoice_ops": ["erpnext", "gmail", "outlook"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
         "zendesk", "hubspot", "slack", "asana", "erpnext",
-        "gmail", "googlecalendar", "trello", "linear",
+        "gmail", "outlook", "googlecalendar", "trello", "linear",
+        "smartlead", "prospeo", "millionverifier", "emaillistverify",
     ],
 }
 
