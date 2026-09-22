@@ -107,6 +107,47 @@ def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_pay
     }
 
 
+class DiscussionTurnRequest(BaseModel):
+    agent_type: str
+    space_id: str
+    thread_root: str
+    text: str
+
+
+@router.post("/discussion-turn")
+def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_current_user_payload)):
+    """Talk to a deployable agent from a workspace Discussion room (JWT auth).
+
+    Discussion is a deployment channel like console/telegram: identity comes
+    from the discussion_* binding + shared room session, never from prompt
+    coaching. Structured space/thread ids replace the opaque conversation_id.
+    """
+    if body.agent_type not in AGENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type '{body.agent_type}'")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    space_id = (body.space_id or "").strip()
+    thread_root = (body.thread_root or "").strip()
+    if not space_id or not thread_root:
+        raise HTTPException(status_code=400, detail="space_id and thread_root are required")
+
+    record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
+    tier_err = agent_tier_error(record, body.agent_type)
+    if tier_err:
+        raise HTTPException(status_code=403, detail=tier_err)
+
+    result = telegram_service.route_discussion_message(
+        record, body.agent_type, space_id[:128], thread_root[:128], text[:8000]
+    )
+    return {
+        "reply": result["reply"],
+        "agent_type": body.agent_type,
+        "agent_name": AGENT_TYPES[body.agent_type],
+        "pending_approval": result.get("pending_approval"),
+    }
+
+
 @router.get("/link-status/{token}")
 def link_status(token: str, user: dict = Depends(get_current_user_payload)):
     """Dashboard polls this after showing the QR."""

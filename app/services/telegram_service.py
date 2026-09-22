@@ -1045,3 +1045,41 @@ class TelegramService:
         return self._remember_pending_result(
             pseudo_binding, self._route_to_agent(pseudo_binding, text, channel="console")
         )
+
+    def route_discussion_message(
+        self, user: dict, agent_type: str, space_id: str, thread_root: str, text: str
+    ) -> dict:
+        """Talk to a deployable agent from a workspace Discussion room (JWT auth).
+
+        Discussion is a first-class deployment channel, exactly like console /
+        telegram / slack — NOT a prompt-injection script. The channel introduces
+        itself through binding + session identity:
+
+        - binding_id ``discussion_{user}_{space}_{thread}_{agent}`` stays
+          per-agent, so history pointers and per-agent pending approvals never
+          merge (same rule as console pseudo-bindings).
+        - room_session_id ``discussion_{user}_{space}_{thread}`` is shared by
+          every agent answering the same thread, so one round fans out into one
+          downstream session (ledger grouping + shared transcript).
+        - channel ``"discussion"`` is forwarded to the gateway for tracking
+          and routing parity with the other deployment channels.
+
+        Conversational protocol (Ya/Batal) and the pending-approval hint relay
+        are reused verbatim — no new protocol, no new agent-script sections.
+        """
+        space = (space_id or "").strip()[:128]
+        root = (thread_root or "").strip()[:128]
+        pseudo_binding = {
+            "user_id": user["user_id"],
+            "account_type": user.get("account_type", "free"),
+            "agent_type": agent_type,
+            "chat_id": 0,
+            "binding_id": f"discussion_{user['user_id']}_{space}_{root}_{agent_type}",
+            "room_session_id": f"discussion_{user['user_id']}_{space}_{root}",
+        }
+        handled = self._try_conversational_approval(pseudo_binding, text or "")
+        if handled is not None:
+            return handled
+        return self._remember_pending_result(
+            pseudo_binding, self._route_to_agent(pseudo_binding, text, channel="discussion")
+        )
