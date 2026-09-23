@@ -152,17 +152,19 @@ ALTER TABLE product.tenant_custom_mcp_servers
 
 # Approval-gate removal (2026-09-17, owner decision): previously 'irreversible'
 # by default, so every tenant-supplied tool parked as Pending even after an
-# explicit user instruction. New default is 'safe' (never park); existing
-# rows still on the old default migrate with it. Idempotent and safe to run
-# on every boot: no route sets risk_tier today, so any 'irreversible' value
-# found here can only be the old default, never a deliberate per-server
-# choice (a dashboard re-gate control would need to exempt itself here).
+# explicit user instruction. New default is 'safe' (never park) for generic
+# custom servers; a server can still be flipped back to 'irreversible'
+# per-row if gating is ever wanted again for that system.
+# P0 Odoo exception (2026-09-21): rows named 'odoo' (shared Od-MCP) stay
+# 'irreversible' -- ERP writes must park for approval (ADR-006 B5, ADR-012
+# non-goals). The boot migration below exempts them so a restart can never
+# silently ungate Odoo writes.
 _RISK_TIER_MIGRATE_SQL = """
 ALTER TABLE product.tenant_custom_mcp_servers
     ALTER COLUMN risk_tier SET DEFAULT 'safe';
 UPDATE product.tenant_custom_mcp_servers
     SET risk_tier = 'safe', updated_at = now()
-    WHERE status != 'disabled' AND risk_tier = 'irreversible';
+    WHERE status != 'disabled' AND risk_tier = 'irreversible' AND name != 'odoo';
 """
 
 # The original index (still created by some already-deployed instances of
@@ -585,13 +587,25 @@ class ConnectOdooRequest(BaseModel):
     # Settings → Database Name, or the Odoo.sh/OEC.sh dashboard).
     odoo_db: str = Field(min_length=1, max_length=200)
     api_key: str = Field(min_length=1, max_length=2000)
+    # Optional but required for PDF reports on Odoo 19+: /report/pdf is an
+    # auth='user' controller, so a bearer API key alone is rejected there
+    # (401 / HTML login page, not a PDF). Od-MCP falls back to cookie-session
+    # auth via /web/session/authenticate using (db, login, password=api_key),
+    # which needs the Odoo login (email) that owns the API key. JSON-2 CRUD
+    # keeps working without it; only odoo_generate_report needs it.
+    odoo_username: Optional[str] = Field(default=None, max_length=320)
 
     @field_validator("odoo_url")
     @classmethod
     def _validate_odoo_url(cls, v: str) -> str:
+        # P0 hardening: https-only. An Odoo API key over plain http is a
+        # bearer credential on the wire; custom MCP URLs already enforce
+        # this in _validate_https_url. Odoo 19 serves TLS by default
+        # (odoo.sh, self-hosted behind Traefik/Caddy) so this is not a
+        # real deployment blocker.
         parts = urlsplit(v.strip())
-        if parts.scheme not in ("http", "https") or not parts.hostname:
-            raise ValueError("odoo_url must be a valid http(s) URL, e.g. https://yourcompany.odoo.com")
+        if parts.scheme != "https" or not parts.hostname:
+            raise ValueError("odoo_url must be a valid https:// URL, e.g. https://yourcompany.odoo.com")
         return v.strip().rstrip("/")
 
 
@@ -602,15 +616,41 @@ def _od_mcp_admin_token() -> str:
     return token
 
 
+def _od_mcp_revoke_instance(instance_name: str) -> None:
+    """Best-effort removal of one tenant instance from the shared Od-MCP
+    server. Fail-open by design: revoke must never block a dashboard
+    disable/connect retry (network blip, already-deleted instance, admin
+    token rotation). The backend row is the source of truth for what Cerveau
+    is offered; this just avoids orphaned live tokens on the shared server."""
+    try:
+        admin_token = os.getenv("OD_MCP_ADMIN_TOKEN")
+        if not admin_token:
+            return
+        requests.delete(
+            f"{_SHARED_ODOO_MCP_BASE_URL}/admin/instances/{instance_name}",
+            headers={"X-Admin-Token": admin_token},
+            timeout=_OD_MCP_ADMIN_TIMEOUT,
+        )
+    except Exception as e:
+        logger.warning(f"Od-MCP revoke best-effort failed for {instance_name}: {e}")
+
+
 @router.post("/odoo/connect", status_code=201)
 def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user_payload)):
-    """Register the caller's own Odoo (URL + API key) against Aivory's
-    shared Od-MCP server, then run it through the exact same
+    """Register the caller's own Odoo (URL + API key + optional login email)
+    against Aivory's shared Od-MCP server, then run it through the exact same
     initialize + tools/list verification every other custom MCP server
     gets (`_verify_and_persist`) -- so a bad api_key or db name surfaces
     as a normal 'verification failed' reason, not a bespoke error shape,
     and Od-MCP's real client code (not a re-implementation here) is what
-    actually proves the credentials work."""
+    actually proves the credentials work.
+
+    `odoo_username` (login email) is optional for CRUD but required for
+    `odoo_generate_report` on Odoo 19+: /report/pdf is auth='user', bearer
+    alone is rejected, so Od-MCP falls back to session auth with
+    (db, login, password=api_key). Rows named 'odoo' stay 'irreversible'
+    so every write parks as a Cerveau F-1 pending approval (console +
+    Telegram), never auto-executes."""
     _check_agent_type(body.agent_type)
     tier = _require_paid_tier(user["user_id"])
     _require_cerveau_engine(user["user_id"], body.agent_type)
@@ -650,16 +690,28 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
     instance_name = f"t_{user['user_id']}_{body.agent_type}"[:64]
     tenant_token = secrets.token_hex(24)
 
+    # P0: best-effort cleanup of a stale instance from a previous failed
+    # connect (same deterministic name) so a retry does not 409 against its
+    # own orphan. Fail-open; the POST below is authoritative.
+    _od_mcp_revoke_instance(instance_name)
+
+    admin_payload: dict = {
+        "name": instance_name,
+        "url": body.odoo_url,
+        "db": body.odoo_db,
+        "api_key": body.api_key,
+        "mcpToken": tenant_token,
+    }
+    # Forward the login email when the tenant gave it so Od-MCP's report-PDF
+    # session fallback (/web/session/authenticate with password=api_key) can
+    # run. Omit when absent — JSON-2 CRUD does not need it.
+    if body.odoo_username and body.odoo_username.strip():
+        admin_payload["username"] = body.odoo_username.strip()
+
     try:
         admin_resp = requests.post(
             f"{_SHARED_ODOO_MCP_BASE_URL}/admin/instances",
-            json={
-                "name": instance_name,
-                "url": body.odoo_url,
-                "db": body.odoo_db,
-                "api_key": body.api_key,
-                "mcpToken": tenant_token,
-            },
+            json=admin_payload,
             headers={"X-Admin-Token": admin_token},
             timeout=_OD_MCP_ADMIN_TIMEOUT,
         )
@@ -679,8 +731,8 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
             cur.execute(
                 """
                 INSERT INTO product.tenant_custom_mcp_servers
-                    (user_id, agent_type, name, url, transport, auth_header_name, auth_header_value_encrypted)
-                VALUES (%s, %s, %s, %s, %s, NULL, NULL)
+                    (user_id, agent_type, name, url, transport, auth_header_name, auth_header_value_encrypted, risk_tier)
+                VALUES (%s, %s, %s, %s, %s, NULL, NULL, 'irreversible')
                 RETURNING id
                 """,
                 (user["user_id"], body.agent_type, "odoo", mcp_url, "streamable-http"),
@@ -688,6 +740,9 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
             (row_id,) = cur.fetchone()
         conn.commit()
     except Exception as e:
+        # P0: the instance was just created on Od-MCP but the row insert
+        # failed -- revoke best-effort so no orphaned live token remains.
+        _od_mcp_revoke_instance(instance_name)
         logger.error(f"odoo connect row insert failed for {user['user_id']}: {e}")
         raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
     finally:
@@ -827,7 +882,7 @@ def disable_server(server_id: str, user: dict = Depends(get_current_user_payload
                 UPDATE product.tenant_custom_mcp_servers
                 SET status = 'disabled', disabled_at = now(), updated_at = now()
                 WHERE id = %s AND user_id = %s AND status != 'disabled'
-                RETURNING id
+                RETURNING id, agent_type, name
                 """,
                 (server_id, user["user_id"]),
             )
@@ -835,6 +890,15 @@ def disable_server(server_id: str, user: dict = Depends(get_current_user_payload
         conn.commit()
         if not row:
             raise HTTPException(status_code=404, detail="Server not found or already disabled")
+        # P0: revoke the tenant instance on the shared Od-MCP server so the
+        # bearer token stops working. Fail-open: the backend row (source of
+        # truth for Cerveau) is already disabled above.
+        try:
+            _row_id, _agent_type, _name = row
+            if _name == "odoo":
+                _od_mcp_revoke_instance(f"t_{user['user_id']}_{_agent_type}"[:64])
+        except Exception as e:
+            logger.warning(f"Od-MCP revoke after disable best-effort failed for {server_id}: {e}")
         return {"ok": True}
     except HTTPException:
         raise
