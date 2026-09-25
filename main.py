@@ -42,10 +42,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] Account-cleanup poller failed to start: {e}")
 
+    # Odoo API key expiry check (app/routes/tenant_mcp_servers.py): flags
+    # expired tenant keys and records upcoming expiries every 6 h.
+    odoo_key_task = None
+    try:
+        from app.routes.tenant_mcp_servers import run_odoo_key_poller
+        odoo_key_task = asyncio.create_task(run_odoo_key_poller())
+        print("[OK] Odoo key-expiry poller started")
+    except Exception as e:
+        print(f"[!] Odoo key-expiry poller failed to start: {e}")
+
     yield
     print("[SHUTDOWN] avry-backend stopping...")
     if cleanup_task:
         cleanup_task.cancel()
+    if odoo_key_task:
+        odoo_key_task.cancel()
     if _PG:
         await pg.close_pool()
 

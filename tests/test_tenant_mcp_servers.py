@@ -191,7 +191,7 @@ class RowToPublicDict(unittest.TestCase):
 
         now = datetime.now(timezone.utc)
         return ("id-1", "customer_service", "srv", "https://tenant.example/mcp", "streamable-http", None,
-                "verified", now, None, 2, now, tools_json, disabled_tools)
+                "verified", now, None, 2, now, tools_json, disabled_tools, None)
 
     def test_populated_row(self):
         tools = [{"name": "get_orders", "description": "List orders"}]
@@ -322,3 +322,59 @@ def test_odoo_methods_are_scoped_per_agent():
     # The returned list is a copy: callers can't mutate the shared default.
     sales.append("x.y.z")
     assert "x.y.z" not in _odoo_methods_for("leads_qualifier")
+
+
+class OdooKeyCheck(unittest.TestCase):
+    """Review point 6: expired Odoo keys must surface before agents 401."""
+
+    def _run(self, key_status_json, status_code=200):
+        executed = []
+
+        class Cur:
+            def __init__(self):
+                self.rows = [("row-1", "user_abc", "leads_qualifier")]
+            def execute(self, sql, params=None):
+                executed.append((sql, params))
+            def fetchall(self):
+                return self.rows
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        class Conn:
+            def cursor(self):
+                return Cur()
+            def commit(self):
+                pass
+            def close(self):
+                pass
+
+        class Resp:
+            def __init__(self):
+                self.status_code = status_code
+            def json(self):
+                return key_status_json
+
+        with patch.dict("os.environ", {"OD_MCP_ADMIN_TOKEN": "t"}), patch.object(m, "_connect", return_value=Conn()), \
+                patch.object(m, "_ensure_schema"), patch.object(m.requests, "get", return_value=Resp()) as get:
+            summary = m.check_shared_odoo_keys()
+        return summary, executed, get
+
+    def test_rejected_key_marks_row_failed_with_instructions(self):
+        summary, executed, get = self._run({"valid": False, "error": "Invalid apikey"})
+        self.assertEqual(summary, {"checked": 1, "expired": 1, "errors": 0})
+        self.assertIn("/admin/instances/t_user_abc_leads_qualifier/key-status", get.call_args.args[0])
+        update = [e for e in executed if "verification_failed" in e[0]]
+        self.assertEqual(update[0][1], (m._ODOO_KEY_REJECTED_REASON, "row-1"))
+
+    def test_live_key_records_expiry(self):
+        summary, executed, _ = self._run({"valid": True, "expires_at": "2026-09-27T00:00:00Z"})
+        self.assertEqual(summary["expired"], 0)
+        update = [e for e in executed if "credential_expires_at = %s" in e[0]]
+        self.assertEqual(update[0][1], ("2026-09-27T00:00:00Z", "row-1"))
+
+    def test_od_mcp_error_is_counted_not_fatal(self):
+        summary, executed, _ = self._run({}, status_code=502)
+        self.assertEqual(summary, {"checked": 0, "expired": 0, "errors": 1})
+        self.assertFalse([e for e in executed if e[0].startswith("UPDATE")])

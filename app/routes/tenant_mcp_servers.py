@@ -148,7 +148,9 @@ CREATE TABLE IF NOT EXISTS product.tenant_custom_mcp_servers (
 _MIGRATE_SQL = """
 ALTER TABLE product.tenant_custom_mcp_servers
     ADD COLUMN IF NOT EXISTS tools_json JSONB NOT NULL DEFAULT '[]',
-    ADD COLUMN IF NOT EXISTS disabled_tools TEXT[] NOT NULL DEFAULT '{}';
+    ADD COLUMN IF NOT EXISTS disabled_tools TEXT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS credential_expires_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS credential_checked_at TIMESTAMPTZ;
 """
 
 # Approval-gate removal (2026-09-17, owner decision): previously 'irreversible'
@@ -431,7 +433,8 @@ class RegisterServerRequest(BaseModel):
 
 _LIST_COLUMNS = (
     "id, agent_type, name, url, transport, auth_header_name, status,"
-    " last_verified_at, last_verify_error, tool_count, created_at, tools_json, disabled_tools"
+    " last_verified_at, last_verify_error, tool_count, created_at, tools_json, disabled_tools,"
+    " credential_expires_at"
 )
 
 
@@ -450,6 +453,7 @@ def _row_to_public_dict(row) -> dict:
         created_at,
         tools_json,
         disabled_tools,
+        credential_expires_at,
     ) = row
     return {
         "id": str(row_id),
@@ -468,6 +472,9 @@ def _row_to_public_dict(row) -> dict:
         # hand back a bare `None` from some driver/version combos.
         "tools": tools_json if tools_json is not None else [],
         "disabled_tools": list(disabled_tools) if disabled_tools else [],
+        # Shared Od-MCP rows only: when the tenant's Odoo API key expires, as
+        # last seen by `check_shared_odoo_keys`. Null = unknown or no expiry.
+        "credential_expires_at": credential_expires_at.isoformat() if credential_expires_at else None,
     }
 
 
@@ -716,6 +723,87 @@ def _roster_label(agent_type: str) -> Optional[str]:
     return None
 
 
+def _od_mcp_instance_name(user_id: str, agent_type: str) -> str:
+    """Same deterministic name connect_odoo registers the instance under."""
+    return f"t_{user_id}_{agent_type}"[:64]
+
+
+def check_shared_odoo_keys() -> dict:
+    """Ask Od-MCP when each tenant's Odoo API key expires (review point 6).
+
+    Odoo 19 API keys expire (the default duration is short) and nothing
+    warned anyone: Lex's key died overnight while the card said verified.
+    A rejected key flips the row to verification_failed with how to fix it;
+    a live one records `credential_expires_at` for the dashboard warning.
+    Sync (psycopg2 + requests): run it in a thread from async code."""
+    admin_token = os.getenv("OD_MCP_ADMIN_TOKEN")
+    if not admin_token:
+        return {"skipped": "OD_MCP_ADMIN_TOKEN not set"}
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, user_id, agent_type FROM product.tenant_custom_mcp_servers"
+                " WHERE name = 'odoo' AND status = 'verified' AND url LIKE %s",
+                (f"{_SHARED_ODOO_MCP_BASE_URL}/mcp%",),
+            )
+            rows = cur.fetchall()
+        summary = {"checked": 0, "expired": 0, "errors": 0}
+        for row_id, user_id, agent_type in rows:
+            instance = _od_mcp_instance_name(user_id, agent_type)
+            try:
+                r = requests.get(
+                    f"{_SHARED_ODOO_MCP_BASE_URL}/admin/instances/{instance}/key-status",
+                    headers={"X-Admin-Token": admin_token},
+                    timeout=_OD_MCP_ADMIN_TIMEOUT,
+                )
+                if r.status_code != 200:
+                    summary["errors"] += 1
+                    continue
+                status = r.json()
+            except Exception as e:  # noqa: BLE001 - one tenant must not stop the sweep
+                logger.warning(f"Od-MCP key-status failed for {instance}: {e}")
+                summary["errors"] += 1
+                continue
+            summary["checked"] += 1
+            with conn.cursor() as cur:
+                if status.get("valid") is False:
+                    summary["expired"] += 1
+                    cur.execute(
+                        "UPDATE product.tenant_custom_mcp_servers"
+                        " SET status = 'verification_failed', last_verify_error = %s,"
+                        " credential_checked_at = now(), updated_at = now() WHERE id = %s",
+                        (_ODOO_KEY_REJECTED_REASON, row_id),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE product.tenant_custom_mcp_servers"
+                        " SET credential_expires_at = %s, credential_checked_at = now() WHERE id = %s",
+                        (status.get("expires_at"), row_id),
+                    )
+            conn.commit()
+        return summary
+    finally:
+        conn.close()
+
+
+_ODOO_KEY_CHECK_INTERVAL_SECONDS = int(os.getenv("ODOO_KEY_CHECK_INTERVAL_SECONDS", "21600"))
+
+
+async def run_odoo_key_poller() -> None:
+    """Started once from main.py's lifespan; never returns."""
+    import asyncio
+
+    while True:
+        try:
+            summary = await asyncio.to_thread(check_shared_odoo_keys)
+            logger.info(f"Odoo key check: {summary}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Odoo key check failed: {e}")
+        await asyncio.sleep(_ODOO_KEY_CHECK_INTERVAL_SECONDS)
+
+
 @router.post("/odoo/connect", status_code=201)
 def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user_payload)):
     """Register the caller's own Odoo (URL + API key + optional login email)
@@ -768,7 +856,7 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
     # Instance name must be unique per (tenant, agent_type) and satisfy
     # Od-MCP's own `valid_instance_name` (alnum/-/_ only) -- user_id is
     # already that shape (`user_<hex>`), agent_type is a fixed enum.
-    instance_name = f"t_{user['user_id']}_{body.agent_type}"[:64]
+    instance_name = _od_mcp_instance_name(user["user_id"], body.agent_type)
     tenant_token = secrets.token_hex(24)
 
     # P0: best-effort cleanup of a stale instance from a previous failed
