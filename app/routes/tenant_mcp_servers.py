@@ -59,6 +59,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.database.db_service import DatabaseService
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
 from app.routes.agent_profiles import AGENT_TYPES, load_profile_internal
+from app.routes.agent_roster import AGENT_ROSTER
 from app.services import mcp_server_encryption, tiers
 from app.services.guarded_fetch import GuardedFetchError, guarded_fetch
 from app.services.telegram_service import is_superadmin, load_user_record
@@ -301,11 +302,50 @@ def _mcp_jsonrpc_call(url: str, method: str, params: dict, headers: dict, reques
     return parsed.get("result") or {}, session_id
 
 
+_ODOO_KEY_REJECTED_REASON = (
+    "Odoo rejected the API key: it has expired or been revoked. In Odoo, open "
+    "Preferences > Account Security > New API Key, choose a longer duration, "
+    "then reconnect Odoo here."
+)
+
+
+def _is_shared_odoo_url(url: str) -> bool:
+    return url.startswith(f"{_SHARED_ODOO_MCP_BASE_URL}/mcp")
+
+
+def _probe_shared_odoo(url: str, headers: dict) -> None:
+    """One real read against the tenant's Odoo through Od-MCP.
+
+    initialize + tools/list never touch Odoo (Od-MCP answers them itself),
+    so a wrong, expired or revoked API key used to verify fine and then
+    401 on every agent call. Odoo 19 API keys default to short durations,
+    so this is the common failure, not a corner case (seen 2026-09-25: a
+    1-day key expired overnight while the card still said verified)."""
+    try:
+        result, _ = _mcp_jsonrpc_call(
+            url,
+            "tools/call",
+            {"name": "odoo_check_access", "arguments": {"model": "res.partner", "operation": "read"}},
+            headers,
+            request_id=3,
+        )
+    except GuardedFetchError as e:
+        msg = str(e)
+        lowered = msg.lower()
+        if "401" in msg or "apikey" in lowered or "api key" in lowered or "access denied" in lowered:
+            raise GuardedFetchError(_ODOO_KEY_REJECTED_REASON)
+        raise GuardedFetchError(f"Odoo did not answer a test read: {msg[:300]}")
+    if isinstance(result, dict) and result.get("isError"):
+        raise GuardedFetchError("Odoo did not answer a test read through the connector.")
+
+
 def _run_verification(url: str, auth_header_name: Optional[str], auth_header_value: Optional[str]) -> dict:
     """Real MCP initialize + tools/list handshake through the guarded
     fetcher. Returns {tools: [{name, description}]} on success. Raises
     GuardedFetchError (safe-to-display reason) on any failure — SSRF
-    rejection, network failure, non-2xx, or malformed/error JSON-RPC."""
+    rejection, network failure, non-2xx, or malformed/error JSON-RPC.
+    For Aivory's shared Od-MCP it also proves the Odoo credentials with one
+    read (`_probe_shared_odoo`)."""
     headers = {}
     if auth_header_name and auth_header_value:
         headers[auth_header_name] = auth_header_value
@@ -317,6 +357,8 @@ def _run_verification(url: str, auth_header_name: Optional[str], auth_header_val
     raw_tools = result.get("tools")
     if not isinstance(raw_tools, list):
         raise GuardedFetchError("server did not return a tools list")
+    if _is_shared_odoo_url(url):
+        _probe_shared_odoo(url, headers)
 
     tools = []
     for t in raw_tools:
@@ -573,7 +615,10 @@ def _verify_and_persist(
 # param on the registered URL rather than an Authorization header, so it
 # never collides with any other auth layer in front of that shared server.
 
-_SHARED_ODOO_MCP_BASE_URL = "https://odoo-mcp.aivory.uk"
+# Overridable for staging. Cerveau's read-tool carve-out matches this exact
+# host (odoo-mcp.aivory.uk), so a different host keeps every Odoo tool gated
+# until Cerveau learns it too — it fails closed, never open.
+_SHARED_ODOO_MCP_BASE_URL = os.getenv("OD_MCP_BASE_URL", "https://odoo-mcp.aivory.uk").rstrip("/")
 _OD_MCP_ADMIN_TIMEOUT = 15
 
 
@@ -633,6 +678,14 @@ def _od_mcp_revoke_instance(instance_name: str) -> None:
         )
     except Exception as e:
         logger.warning(f"Od-MCP revoke best-effort failed for {instance_name}: {e}")
+
+
+def _roster_label(agent_type: str) -> Optional[str]:
+    """ "Lex - Sales and Lead Agent" for a roster agent_type, else None."""
+    for entry in AGENT_ROSTER:
+        if entry["agent_type"] == agent_type:
+            return f'{entry["name"]} - {entry["title"]}'
+    return None
 
 
 @router.post("/odoo/connect", status_code=201)
@@ -707,6 +760,12 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
     # run. Omit when absent — JSON-2 CRUD does not need it.
     if body.odoo_username and body.odoo_username.strip():
         admin_payload["username"] = body.odoo_username.strip()
+    # Od-MCP signs its Odoo chatter notes with this ("Updated by Lex - Sales
+    # and Lead Agent: ..."). Sent from the canonical roster so Od-MCP keeps no
+    # copy of agent names that could go stale on a rename.
+    agent_label = _roster_label(body.agent_type)
+    if agent_label:
+        admin_payload["agentLabel"] = agent_label
 
     try:
         admin_resp = requests.post(

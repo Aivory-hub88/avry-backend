@@ -19,9 +19,10 @@ route was ever exercised against a live instance. `GET /webhook/approvals`
 (added the same day, `crates/zeroclaw-gateway/src/api_tenant_approvals.rs`)
 is the real, tenant-scoped, already-tested fit for what this file needs.
 
-Two HA instances (`:3100`/`:3101`) each hold their own pending-store
-(separate `data_dir`s), so listing merges both and resolve tries both — the
-row lives on whichever instance created it.
+Each Cerveau instance holds its own pending-store (separate `data_dir`s), so
+listing merges every configured base and resolve tries each — the row lives
+on whichever instance created it. Today there is one (`:3100`); set
+CERVEAU_APPROVAL_BASE_2 only if a second instance comes back.
 
 Security contract:
   - JWT required on every route (same dependency as the rest of /api/v1).
@@ -58,9 +59,17 @@ router = APIRouter(prefix="/api/v1/agent-approvals", tags=["agent-approvals"])
 # host.docker.internal:3100 returns 200 — this silently broke both listing
 # and resolving every pending approval (caught per-base, logged as a
 # warning, never surfaced) until this default was fixed 2026-08-25.
+#
+# 2026-09-25: instance B (:3101) was deleted on 2026-09-18, but it stayed the
+# default here, so every approvals list made one refused connection (and one
+# WARNING) per agent_type on every poll. A second base is now opt-in only.
 _CERVEAU_BASES = [
-    os.getenv("CERVEAU_APPROVAL_BASE_1", "http://host.docker.internal:3100"),
-    os.getenv("CERVEAU_APPROVAL_BASE_2", "http://host.docker.internal:3101"),
+    base
+    for base in (
+        os.getenv("CERVEAU_APPROVAL_BASE_1", "http://host.docker.internal:3100"),
+        os.getenv("CERVEAU_APPROVAL_BASE_2", ""),
+    )
+    if base
 ]
 _TIMEOUT = httpx.Timeout(10.0)
 

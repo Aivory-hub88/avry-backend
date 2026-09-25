@@ -254,3 +254,56 @@ class TierQuota(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def test_roster_label_comes_from_canonical_roster():
+    # Od-MCP signs Odoo chatter notes with this, so it must track the roster
+    # (a rename there must not need a change anywhere else).
+    from app.routes.agent_roster import AGENT_ROSTER
+    from app.routes.tenant_mcp_servers import _roster_label
+
+    for entry in AGENT_ROSTER:
+        assert _roster_label(entry["agent_type"]) == f'{entry["name"]} - {entry["title"]}'
+    assert _roster_label("leads_qualifier") == "Lex - Sales and Lead Agent"
+    assert _roster_label("not_an_agent") is None
+
+
+class SharedOdooCredentialProbeTests(unittest.TestCase):
+    """tools/list never reaches Odoo, so verification must make one real
+    read or an expired/revoked Odoo API key keeps showing as verified."""
+
+    ODOO_URL = f"{m._SHARED_ODOO_MCP_BASE_URL}/mcp?token=abc"
+
+    def _calls(self, check_access_error=None):
+        def fake(url, method, params, headers, request_id):
+            if method == "tools/list":
+                return {"tools": [{"name": "odoo_count"}]}, None
+            if method == "tools/call":
+                assert params["name"] == "odoo_check_access"
+                if check_access_error:
+                    raise GuardedFetchError(check_access_error)
+                return {"content": [{"type": "text", "text": "{\"has_access\": true}"}]}, None
+            raise AssertionError(method)
+        return fake
+
+    def test_rejected_key_fails_with_actionable_reason(self):
+        with patch.object(m, "_run_verification_init", return_value=None), patch.object(
+            m, "_mcp_jsonrpc_call",
+            side_effect=self._calls('MCP error: odoo http 401 Unauthorized: {"message": "Invalid apikey"}'),
+        ):
+            with self.assertRaises(GuardedFetchError) as ctx:
+                m._run_verification(self.ODOO_URL, None, None)
+        self.assertEqual(str(ctx.exception), m._ODOO_KEY_REJECTED_REASON)
+
+    def test_working_key_verifies(self):
+        with patch.object(m, "_run_verification_init", return_value=None), patch.object(
+            m, "_mcp_jsonrpc_call", side_effect=self._calls()
+        ):
+            self.assertEqual(m._run_verification(self.ODOO_URL, None, None)["tools"], [{"name": "odoo_count", "description": ""}])
+
+    def test_other_servers_are_not_probed(self):
+        with patch.object(m, "_run_verification_init", return_value=None), patch.object(
+            m, "_mcp_jsonrpc_call", side_effect=self._calls("should not be called")
+        ) as call:
+            m._run_verification("https://mcp.example.com/mcp", None, None)
+        self.assertEqual([c.args[1] for c in call.call_args_list], ["tools/list"])
