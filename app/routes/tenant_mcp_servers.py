@@ -680,6 +680,34 @@ def _od_mcp_revoke_instance(instance_name: str) -> None:
         logger.warning(f"Od-MCP revoke best-effort failed for {instance_name}: {e}")
 
 
+# Odoo workflow actions each agent may run through Od-MCP's
+# odoo_execute_method (still approval-gated in Cerveau). Sent per instance at
+# connect so Od-MCP enforces it: one server-wide list let the Sales agent's
+# connection post invoices. Agents not listed get an explicit empty list.
+_SALES_ODOO_METHODS = [
+    "crm.lead.action_set_won",
+    "crm.lead.action_set_lost",
+    "crm.lead.action_restore",
+    "sale.order.action_confirm",
+    "sale.order.action_cancel",
+    "sale.order.action_draft",
+]
+_FINANCE_ODOO_METHODS = [
+    "account.move.action_post",
+    "account.move.button_draft",
+]
+_ODOO_METHODS_BY_AGENT = {
+    "leads_qualifier": _SALES_ODOO_METHODS,
+    "finance_invoice_ops": _FINANCE_ODOO_METHODS,
+    # Generalist: the one agent that carries every toolkit.
+    "autonomous": _SALES_ODOO_METHODS + _FINANCE_ODOO_METHODS,
+}
+
+
+def _odoo_methods_for(agent_type: str) -> list[str]:
+    return list(_ODOO_METHODS_BY_AGENT.get(agent_type, []))
+
+
 def _roster_label(agent_type: str) -> Optional[str]:
     """ "Lex - Sales and Lead Agent" for a roster agent_type, else None."""
     for entry in AGENT_ROSTER:
@@ -766,6 +794,7 @@ def connect_odoo(body: ConnectOdooRequest, user: dict = Depends(get_current_user
     agent_label = _roster_label(body.agent_type)
     if agent_label:
         admin_payload["agentLabel"] = agent_label
+    admin_payload["allowedMethods"] = _odoo_methods_for(body.agent_type)
 
     try:
         admin_resp = requests.post(

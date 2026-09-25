@@ -307,3 +307,18 @@ class SharedOdooCredentialProbeTests(unittest.TestCase):
         ) as call:
             m._run_verification("https://mcp.example.com/mcp", None, None)
         self.assertEqual([c.args[1] for c in call.call_args_list], ["tools/list"])
+
+
+def test_odoo_methods_are_scoped_per_agent():
+    from app.routes.tenant_mcp_servers import _odoo_methods_for
+
+    sales = _odoo_methods_for("leads_qualifier")
+    assert "crm.lead.action_set_won" in sales
+    assert "account.move.action_post" not in sales  # Sales never posts invoices
+    finance = _odoo_methods_for("finance_invoice_ops")
+    assert finance == ["account.move.action_post", "account.move.button_draft"]
+    assert _odoo_methods_for("customer_service") == []
+    assert set(_odoo_methods_for("autonomous")) == set(sales) | set(finance)
+    # The returned list is a copy: callers can't mutate the shared default.
+    sales.append("x.y.z")
+    assert "x.y.z" not in _odoo_methods_for("leads_qualifier")
