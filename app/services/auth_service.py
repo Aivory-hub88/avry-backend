@@ -26,6 +26,8 @@ except ImportError:
     _PG_AVAILABLE = False
 
 # ── JWT config ────────────────────────────────────────────────────────────────
+from app.services.token_kinds import is_access_payload, is_refresh_payload
+
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60      # 1 hour (was 15 min)
@@ -74,6 +76,7 @@ class AuthService:
             "account_type": user.get("account_type", "free"),
             "full_name":    user.get("full_name"),
             "username":     user.get("username"),
+            "type":         "access",
             "exp": _now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
             "iat": _now(),
         }
@@ -83,16 +86,32 @@ class AuthService:
         payload = {
             "user_id":    user_id,
             "session_id": session_id,
+            "type":       "refresh",
             "exp": _now() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
             "iat": _now(),
         }
         return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    def verify_token(self, token: str) -> Optional[dict]:
+    @staticmethod
+    def _decode(token: str) -> Optional[dict]:
         try:
             return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
             return None
+
+    def verify_token(self, token: str) -> Optional[dict]:
+        """Verify an ACCESS token (what every bearer-authenticated route needs).
+
+        Refresh tokens are rejected even though they share the signing
+        secret — see app/services/token_kinds.py.
+        """
+        payload = self._decode(token)
+        return payload if payload and is_access_payload(payload) else None
+
+    def verify_refresh_token(self, token: str) -> Optional[dict]:
+        """Verify a REFRESH token (refresh, logout); access tokens are rejected."""
+        payload = self._decode(token)
+        return payload if payload and is_refresh_payload(payload) else None
 
     # ── Tier helpers (unchanged logic) ───────────────────────────────────────
 
@@ -307,7 +326,7 @@ class AuthService:
         )
 
     async def refresh_access_token(self, refresh_token: str) -> TokenPair:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             raise ValueError("Invalid or expired refresh token")
 
@@ -363,7 +382,7 @@ class AuthService:
         )
 
     async def logout(self, refresh_token: str) -> bool:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             return False
 
@@ -397,7 +416,7 @@ class AuthService:
         return self._build_user_response(user)
 
     async def get_user_from_refresh_token(self, refresh_token: str) -> Optional[dict]:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             return None
         pg_up = _PG_AVAILABLE and await pg.is_available()
