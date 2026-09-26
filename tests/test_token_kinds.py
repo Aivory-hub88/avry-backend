@@ -86,5 +86,30 @@ class TokenKindsTest(unittest.TestCase):
         self.assertEqual(deps.current_payload(f"Bearer {access}")["user_id"], "u1")
 
 
+
+class AccessTtlTest(unittest.TestCase):
+    def test_default_is_twelve_hours_and_env_is_clamped(self):
+        import os
+        from app.services import auth_service as mod
+
+        saved = os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES")
+        try:
+            os.environ.pop("ACCESS_TOKEN_EXPIRE_MINUTES", None)
+            self.assertEqual(mod._access_ttl_minutes(), 720)
+            for raw, want in (("60", 60), ("1", 5), ("99999", 1440), ("nope", 720)):
+                os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = raw
+                self.assertEqual(mod._access_ttl_minutes(), want)
+        finally:
+            if saved is None:
+                os.environ.pop("ACCESS_TOKEN_EXPIRE_MINUTES", None)
+            else:
+                os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = saved
+
+    def test_issued_access_token_lives_twelve_hours(self):
+        svc = AuthService(_FakeDB())
+        p = jwt.decode(svc.create_access_token({"user_id": "u1", "email": "a@b.co"}), JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        self.assertEqual(p["exp"] - p["iat"], 12 * 3600)
+
+
 if __name__ == "__main__":
     unittest.main()
