@@ -30,7 +30,21 @@ from app.services.token_kinds import is_access_payload, is_refresh_payload
 
 JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60      # 1 hour (was 15 min)
+# Access tokens last 12 hours by default (was 1 hour). The landing stores
+# the access token in the aivory_access_token cookie that the admin
+# middleware and some dashboard server routes read, and client-side refresh
+# only updates localStorage, so a 1-hour token made cookie-based sessions
+# fail after an hour even though the refresh token was still good.
+# Override with ACCESS_TOKEN_EXPIRE_MINUTES (5 min .. 24 h).
+def _access_ttl_minutes() -> int:
+    try:
+        value = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "720"))
+    except ValueError:
+        value = 720
+    return max(5, min(value, 24 * 60))
+
+
+ACCESS_TOKEN_EXPIRE_MINUTES = _access_ttl_minutes()
 # Refresh window: 30 days SLIDING (was 7 days absolute). Every successful
 # refresh pushes the server-side session expiry out another 30 days, so an
 # active user never hits a login wall while an idle one ages out — the
