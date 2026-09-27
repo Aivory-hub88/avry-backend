@@ -762,7 +762,13 @@ class TelegramService:
         payload = {
             "user_id": binding["user_id"],
             "agent_type": binding["agent_type"],
-            "session_id": binding.get("binding_id") or str(binding["chat_id"]),
+            # The continuation turn joins the same shared room session as the
+            # turn that raised the approval (see route_console_message);
+            # otherwise its ledger rows land in a per-agent bucket and the
+            # Mission Timeline loses them.
+            "session_id": binding.get("room_session_id")
+            or binding.get("binding_id")
+            or str(binding["chat_id"]),
             "pending_id": pending_id,
             "decision": decision,
         }

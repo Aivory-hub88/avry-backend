@@ -120,5 +120,45 @@ class ConsoleRoomSessionTest(unittest.TestCase):
         self.assertEqual(kwargs["json"]["session_id"], "tgbind_1")
 
 
+    def _approval_session(self, binding):
+        svc = make_service()
+
+        class FakeResp:
+            ok = True
+
+            def json(self):
+                return {"reply_text": "ok", "outcome": "approved"}
+
+        with (
+            patch("requests.post", return_value=FakeResp()) as post,
+            patch.object(ts, "settings", MagicMock(telegram_agent_gateway_url="http://x")),
+        ):
+            svc._resolve_approval(binding, "p1", "approve")
+        _, kwargs = post.call_args
+        return kwargs["json"]["session_id"]
+
+    def test_approval_decision_uses_room_session(self):
+        binding = {
+            "user_id": "u1",
+            "agent_type": "leads_qualifier",
+            "chat_id": 0,
+            "binding_id": "console_u1_leads_qualifier_c1",
+            "room_session_id": "console_u1_c1",
+        }
+        self.assertEqual(self._approval_session(binding), "console_u1_c1")
+
+    def test_approval_decision_falls_back_without_room_session(self):
+        binding = {
+            "user_id": "u1",
+            "agent_type": "customer_service",
+            "chat_id": 99,
+            "binding_id": "tgbind_1",
+        }
+        self.assertEqual(self._approval_session(binding), "tgbind_1")
+        self.assertEqual(
+            self._approval_session({"user_id": "u1", "agent_type": "x", "chat_id": 99}), "99"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
