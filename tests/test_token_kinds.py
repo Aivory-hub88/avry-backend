@@ -95,8 +95,8 @@ class AccessTtlTest(unittest.TestCase):
         saved = os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES")
         try:
             os.environ.pop("ACCESS_TOKEN_EXPIRE_MINUTES", None)
-            self.assertEqual(mod._access_ttl_minutes(), 720)
-            for raw, want in (("60", 60), ("1", 5), ("99999", 1440), ("nope", 720)):
+            self.assertEqual(mod._access_ttl_minutes(), 60)
+            for raw, want in (("720", 720), ("1", 5), ("99999", 1440), ("nope", 60)):
                 os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = raw
                 self.assertEqual(mod._access_ttl_minutes(), want)
         finally:
@@ -105,10 +105,10 @@ class AccessTtlTest(unittest.TestCase):
             else:
                 os.environ["ACCESS_TOKEN_EXPIRE_MINUTES"] = saved
 
-    def test_issued_access_token_lives_twelve_hours(self):
+    def test_issued_access_token_lives_one_hour(self):
         svc = AuthService(_FakeDB())
         p = jwt.decode(svc.create_access_token({"user_id": "u1", "email": "a@b.co"}), JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        self.assertEqual(p["exp"] - p["iat"], 12 * 3600)
+        self.assertEqual(p["exp"] - p["iat"], 3600)
 
 
 if __name__ == "__main__":
