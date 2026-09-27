@@ -33,4 +33,7 @@ jobs:
         run: python -m py_compile app/main.py && python -m py_compile app/services/tiers.py && python -m py_compile app/services/guarded_fetch.py
 
       - name: Tests
+        # The app refuses to import without JWT_SECRET (fail-closed); any non-placeholder value works here.
+        env:
+          JWT_SECRET: ci-only-test-secret
         run: python -m unittest discover -s tests -v

@@ -5,7 +5,6 @@ The impersonation token carries dual identity context: the admin's real identity
 audit attribution, and the target user's identity for data resolution.
 """
 
-import os
 import jwt
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -13,7 +12,7 @@ from dataclasses import dataclass
 
 
 # JWT configuration — reuses the same secret as the main auth service
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 IMPERSONATION_TOKEN_TTL_MINUTES = 60  # 60-minute TTL
 

@@ -7,7 +7,6 @@ including impersonation events with source label "impersonation-monitor".
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Optional, List
 
@@ -19,7 +18,7 @@ from app.database import pg_service as pg
 logger = logging.getLogger(__name__)
 
 # JWT config (same as used in impersonation routes)
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 
 # Create router
