@@ -5,7 +5,6 @@ Provides endpoints for the admin dashboard to list all users,
 list admin accounts, create/suspend/reactivate admin accounts.
 """
 
-import os
 import secrets
 import string
 import logging
@@ -21,7 +20,7 @@ from app.utils.id_generator import generate_id
 
 logger = logging.getLogger(__name__)
 
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 
 # Account types that the admin dashboard's "admin accounts" screen manages.

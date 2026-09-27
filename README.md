@@ -44,7 +44,7 @@ Copy `.env.example` to `.env`:
 DATABASE_URL=postgresql://user:password@localhost:5432/aivery
 PORT=8081
 ENVIRONMENT=development
-JWT_SECRET=your_secret_key_here
+JWT_SECRET=your_secret_key_here  # required: the service refuses to start if unset or left as this placeholder
 LOG_LEVEL=INFO
 OPENROUTER_KEY=your_key_here
 MIDTRANS_SERVER_KEY=your_key_here

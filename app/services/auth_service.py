@@ -28,7 +28,7 @@ except ImportError:
 # ── JWT config ────────────────────────────────────────────────────────────────
 from app.services.token_kinds import is_access_payload, is_refresh_payload
 
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 # Access tokens last 12 hours by default (was 1 hour). The landing stores
 # the access token in the aivory_access_token cookie that the admin

@@ -1,5 +1,4 @@
 """Shared FastAPI auth dependencies — JWT bearer validation."""
-import os
 from typing import Optional
 
 import jwt
@@ -7,7 +6,7 @@ from fastapi import Header, HTTPException, Depends
 
 from app.services.token_kinds import is_access_payload
 
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 
 
