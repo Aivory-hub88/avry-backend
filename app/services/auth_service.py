@@ -30,17 +30,18 @@ from app.services.token_kinds import is_access_payload, is_refresh_payload
 
 from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
-# Access tokens last 12 hours by default (was 1 hour). The landing stores
-# the access token in the aivory_access_token cookie that the admin
-# middleware and some dashboard server routes read, and client-side refresh
-# only updates localStorage, so a 1-hour token made cookie-based sessions
-# fail after an hour even though the refresh token was still good.
-# Override with ACCESS_TOKEN_EXPIRE_MINUTES (5 min .. 24 h).
+# Access tokens last 1 hour by default. They were raised to 12 hours as a
+# stopgap while cookie-based sessions couldn't refresh: the user dashboard
+# didn't update the aivory_access_token cookie after a client refresh, and
+# the admin dashboard couldn't refresh landing-login sessions at all. Both
+# refresh properly now (avry-user-dashboard#14, avry-admin-dashboard#1),
+# so the short lifetime is back and a leaked token is useful for an hour,
+# not half a day. Override with ACCESS_TOKEN_EXPIRE_MINUTES (5 min .. 24 h).
 def _access_ttl_minutes() -> int:
     try:
-        value = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "720"))
+        value = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
     except ValueError:
-        value = 720
+        value = 60
     return max(5, min(value, 24 * 60))
 
 
