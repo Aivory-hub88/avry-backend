@@ -154,7 +154,13 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
         raise HTTPException(status_code=403, detail=tier_err)
 
     result = telegram_service.route_discussion_message(
-        record, body.agent_type, space_id[:128], thread_root[:128], text[:8000]
+        record,
+        body.agent_type,
+        space_id[:128],
+        thread_root[:128],
+        text[:8000],
+        # Only the tenant owner's own session may answer a pending approval by text.
+        allow_approval_text=(owner_id == user["user_id"]),
     )
     return {
         "reply": result["reply"],
