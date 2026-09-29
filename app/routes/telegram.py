@@ -16,7 +16,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.database.db_service import DatabaseService
@@ -81,6 +81,8 @@ class AgentChatRequest(BaseModel):
     agent_type: str
     text: str
     conversation_id: Optional[str] = None
+    # ADR-020: the Team a Console Room turn belongs to (must be the caller's own).
+    team_id: Optional[str] = Field(default=None, max_length=64)
 
 
 @router.post("/agent-chat")
@@ -98,7 +100,7 @@ def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_pay
         raise HTTPException(status_code=403, detail=tier_err)
 
     result = telegram_service.route_console_message(
-        record, body.agent_type, text[:8000], body.conversation_id
+        record, body.agent_type, text[:8000], body.conversation_id, team_id=body.team_id
     )
     return {
         "reply": result["reply"],
