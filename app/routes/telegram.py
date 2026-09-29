@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.database.db_service import DatabaseService
 from app.services.auth_service import AuthService
+from app.services import workspace_acting
 from app.services.telegram_service import (
     TelegramService,
     AGENT_TYPES,
@@ -112,6 +113,11 @@ class DiscussionTurnRequest(BaseModel):
     space_id: str
     thread_root: str
     text: str
+    # ADR-020 §1.1: Workspace agents belong to the space's leader. When set
+    # (and different from the caller), the turn runs in that user's tenant and
+    # is billed to them; the caller (a member) is only the requester. Verified
+    # server-side against the space's owner + the caller's write access.
+    acting_as: Optional[str] = None
 
 
 @router.post("/discussion-turn")
@@ -132,7 +138,17 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
     if not space_id or not thread_root:
         raise HTTPException(status_code=400, detail="space_id and thread_root are required")
 
-    record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
+    owner_id = user["user_id"]
+    acting_as = (body.acting_as or "").strip()
+    if acting_as and acting_as != owner_id:
+        if not workspace_acting.can_act_as(space_id, owner_id, acting_as):
+            raise HTTPException(status_code=403, detail="Not allowed to use this workspace's agents")
+        if not telegram_service._load_user(acting_as):
+            raise HTTPException(status_code=403, detail="Workspace leader account not found")
+        logger.info(f"discussion-turn: {owner_id} acting as leader {acting_as} in space {space_id}")
+        owner_id = acting_as
+
+    record = telegram_service._load_user(owner_id) or {"user_id": owner_id}
     tier_err = agent_tier_error(record, body.agent_type)
     if tier_err:
         raise HTTPException(status_code=403, detail=tier_err)
