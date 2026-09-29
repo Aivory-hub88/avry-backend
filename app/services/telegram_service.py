@@ -1053,7 +1053,13 @@ class TelegramService:
         )
 
     def route_discussion_message(
-        self, user: dict, agent_type: str, space_id: str, thread_root: str, text: str
+        self,
+        user: dict,
+        agent_type: str,
+        space_id: str,
+        thread_root: str,
+        text: str,
+        allow_approval_text: bool = True,
     ) -> dict:
         """Talk to a deployable agent from a workspace Discussion room (JWT auth).
 
@@ -1083,7 +1089,14 @@ class TelegramService:
             "binding_id": f"discussion_{user['user_id']}_{space}_{root}_{agent_type}",
             "room_session_id": f"discussion_{user['user_id']}_{space}_{root}",
         }
-        handled = self._try_conversational_approval(pseudo_binding, text or "")
+        # A member acting as the Space leader (ADR-020) must never resolve the
+        # leader's pending approvals with a bare "Ya": only the leader's own
+        # session decides those, so the text protocol is off for that caller.
+        handled = (
+            self._try_conversational_approval(pseudo_binding, text or "")
+            if allow_approval_text
+            else None
+        )
         if handled is not None:
             return handled
         return self._remember_pending_result(

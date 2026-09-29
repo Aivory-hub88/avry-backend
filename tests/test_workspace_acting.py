@@ -86,8 +86,9 @@ class DiscussionTurnRouteTest(unittest.TestCase):
                 return None
             return {"user_id": uid, "account_type": "business"}
 
-        def route(record, agent_type, space, root, text):
+        def route(record, agent_type, space, root, text, allow_approval_text=True):
             seen["tenant"] = record["user_id"]
+            seen["allow_approval_text"] = allow_approval_text
             return {"reply": "ok", "pending_approval": None}
 
         with (
@@ -104,6 +105,14 @@ class DiscussionTurnRouteTest(unittest.TestCase):
         self.assertEqual(seen["tenant"], "leader")
         gate.assert_called_once_with("s1", "member", "leader")
         self.assertEqual(out["reply"], "ok")
+
+    def test_member_acting_as_leader_cannot_approve_by_text(self):
+        _, seen, _ = self.call("leader")
+        self.assertFalse(seen["allow_approval_text"])
+
+    def test_own_tenant_turn_keeps_approval_text(self):
+        _, seen, _ = self.call(None)
+        self.assertTrue(seen["allow_approval_text"])
 
     def test_no_acting_as_keeps_caller_tenant(self):
         _, seen, gate = self.call(None)
@@ -128,3 +137,36 @@ class DiscussionTurnRouteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServiceApprovalTextTest(unittest.TestCase):
+    """The text protocol ("Ya") must not resolve a pending approval when disabled."""
+
+    def _svc(self):
+        from app.services import telegram_service as ts
+
+        svc = ts.TelegramService.__new__(ts.TelegramService)
+        calls = {"approval": 0}
+
+        def approval(binding, text):
+            calls["approval"] += 1
+            return {"reply": "approved", "pending_approval": None}
+
+        svc._try_conversational_approval = approval
+        svc._route_to_agent = lambda b, t, channel="x": {"reply": "agent", "pending_approval": None}
+        svc._remember_pending_result = lambda b, r: r
+        return svc, calls
+
+    def test_disabled_never_consults_the_approval_protocol(self):
+        svc, calls = self._svc()
+        out = svc.route_discussion_message(
+            {"user_id": "leader"}, "leads_qualifier", "s1", "t1", "ya", allow_approval_text=False
+        )
+        self.assertEqual(calls["approval"], 0)
+        self.assertEqual(out["reply"], "agent")
+
+    def test_default_still_resolves_for_the_owner(self):
+        svc, calls = self._svc()
+        out = svc.route_discussion_message({"user_id": "leader"}, "leads_qualifier", "s1", "t1", "ya")
+        self.assertEqual(calls["approval"], 1)
+        self.assertEqual(out["reply"], "approved")
