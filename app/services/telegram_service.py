@@ -959,6 +959,22 @@ class TelegramService:
 
         return ax.compose_prompt(caption, attachments)
 
+    @staticmethod
+    def _team_active_agents(binding: dict, channel: str) -> Optional[list]:
+        """Team-scoped active agents for this turn (ADR-020), or None. Fail-open."""
+        from app.services import teams
+
+        user_id = binding.get("user_id")
+        if not user_id:
+            return None
+        if binding.get("team_id"):
+            return teams.resolve_active_agents(user_id, team_id=binding["team_id"])
+        if channel == "discussion" and binding.get("space_id"):
+            return teams.resolve_active_agents(user_id, kind="workspace", ref=binding["space_id"])
+        if channel == "telegram" and binding.get("binding_id"):
+            return teams.resolve_active_agents(user_id, kind="telegram", ref=binding["binding_id"])
+        return None
+
     def _route_to_agent(self, binding: dict, text: str, channel: str = "telegram") -> dict:
         """Forward the composed prompt to the agent gateway, if configured.
 
@@ -975,23 +991,29 @@ class TelegramService:
             headers["X-Internal-Token"] = gateway_token
         agent_run_tracker.mark_running(binding["user_id"], binding["agent_type"], channel)
         try:
+            message = {
+                "user_id": binding["user_id"],
+                "agent_type": binding["agent_type"],
+                "account_type": binding.get("account_type", "free"),
+                "chat_id": binding["chat_id"],
+                # Room turns share one session across agents (console
+                # pseudo-bindings carry room_session_id); everywhere else
+                # the binding stays the session so histories never merge.
+                "session_id": binding.get("room_session_id")
+                or binding.get("binding_id")
+                or str(binding["chat_id"]),
+                "text": text,
+                "channel": channel,
+            }
+            # ADR-020: a channel bound to an isolated Team limits delegation to
+            # that Team's members. Omitted (= tenant-wide set) otherwise.
+            team_agents = self._team_active_agents(binding, channel)
+            if team_agents:
+                message["active_agents"] = team_agents
             resp = requests.post(
                 f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/message",
                 headers=headers,
-                json={
-                    "user_id": binding["user_id"],
-                    "agent_type": binding["agent_type"],
-                    "account_type": binding.get("account_type", "free"),
-                    "chat_id": binding["chat_id"],
-                    # Room turns share one session across agents (console
-                    # pseudo-bindings carry room_session_id); everywhere else
-                    # the binding stays the session so histories never merge.
-                    "session_id": binding.get("room_session_id")
-                    or binding.get("binding_id")
-                    or str(binding["chat_id"]),
-                    "text": text,
-                    "channel": channel,
-                },
+                json=message,
                 # 195s: headroom over the bridge's own 185s Cerveau call
                 # (Phase 6.1, itself 5s over Cerveau's 180s wall-clock cap) —
                 # was 90s, too short for a Cerveau-routed tenant's
@@ -1015,7 +1037,12 @@ class TelegramService:
         }
 
     def route_console_message(
-        self, user: dict, agent_type: str, text: str, conversation_id: Optional[str] = None
+        self,
+        user: dict,
+        agent_type: str,
+        text: str,
+        conversation_id: Optional[str] = None,
+        team_id: Optional[str] = None,
     ) -> dict:
         """Talk to a deployable agent from the dashboard AI Console.
 
@@ -1045,6 +1072,9 @@ class TelegramService:
             "binding_id": f"console_{user['user_id']}_{agent_type}_{conversation_id or 'default'}",
             "room_session_id": f"console_{user['user_id']}_{conversation_id or 'default'}",
         }
+        if team_id:
+            # Scoped to the caller's own teams at resolution time (ADR-020).
+            pseudo_binding["team_id"] = team_id
         handled = self._try_conversational_approval(pseudo_binding, text or "")
         if handled is not None:
             return handled
@@ -1087,6 +1117,7 @@ class TelegramService:
             "agent_type": agent_type,
             "chat_id": 0,
             "binding_id": f"discussion_{user['user_id']}_{space}_{root}_{agent_type}",
+            "space_id": space,
             "room_session_id": f"discussion_{user['user_id']}_{space}_{root}",
         }
         # A member acting as the Space leader (ADR-020) must never resolve the
