@@ -57,15 +57,16 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # MCP server provisioning before the gate has anything to grant.
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
-    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify"],
-    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear"],
-    "finance_invoice_ops": ["erpnext", "gmail", "outlook"],
+    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify", "googledrive", "googlesheets"],
+    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear", "googledrive", "googlesheets", "googledocs"],
+    "finance_invoice_ops": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
         "zendesk", "hubspot", "slack", "asana", "erpnext",
         "gmail", "outlook", "googlecalendar", "trello", "linear",
         "smartlead", "prospeo", "millionverifier", "emaillistverify",
+        "googledrive", "googlesheets", "googledocs",
     ],
 }
 
