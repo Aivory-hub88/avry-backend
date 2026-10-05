@@ -14,7 +14,7 @@ strings used end to end: the marketing site's product id, the id avry-payments
 prices the Midtrans transaction from, the id granted in
 `routes/entitlements.py`, and the value stored in `identity.user_tiers.tier`.
 
-    operational  — $39/mo
+    operational  — $20/mo
     business     — $99/mo
     enterprise   — sales-assisted, no self-serve price
 
@@ -56,7 +56,7 @@ DISPLAY_NAMES: Dict[str, str] = {
 #: sales-assisted and no figure is published, so nothing may charge for it
 #: self-serve. Mirrors `FIXED_PRICES_USD` in avry-payments' pricing.py.
 MONTHLY_PRICE_USD: Dict[str, int] = {
-    "operational": 39,
+    "operational": 20,
     "business": 99,
 }
 

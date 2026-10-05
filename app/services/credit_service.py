@@ -27,7 +27,7 @@ from app.services import tiers
 logger = logging.getLogger(__name__)
 
 # Monthly credit allowance per tier — mirrors the pricing page
-# (operational $39/80cr, business $99/220cr, enterprise sales-assisted/3000cr).
+# (operational $20/80cr, business $99/220cr, enterprise sales-assisted/3000cr).
 # The table itself lives in app/services/tiers.py so the gates, the allowances
 # and the published prices cannot drift apart again; the previous comment here
 # still quoted $20/$44, prices that had not been charged for some time.
