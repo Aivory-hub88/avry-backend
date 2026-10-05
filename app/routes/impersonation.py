@@ -46,10 +46,9 @@ token_service = ImpersonationTokenService()
 
 # ── Auth dependency ───────────────────────────────────────────────────────────
 
-import os
 import jwt
 
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 
 

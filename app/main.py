@@ -107,6 +107,20 @@ except Exception as e:
     agent_profiles_router = None
 
 try:
+    from app.routes.active_agents import router as active_agents_router
+    print("[✓] Active agents routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import active agents routes: {e}")
+    active_agents_router = None
+
+try:
+    from app.routes.teams import router as teams_router
+    print("[✓] Teams routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import teams routes: {e}")
+    teams_router = None
+
+try:
     from app.routes.agent_roster import router as agent_roster_router
     print("[✓] Agent roster routes registered")
 except Exception as e:
@@ -288,6 +302,10 @@ if agent_profiles_router:
     app.include_router(agent_profiles_router)
 if agent_roster_router:
     app.include_router(agent_roster_router)
+if active_agents_router:
+    app.include_router(active_agents_router)
+if teams_router:
+    app.include_router(teams_router)
 if agent_tool_scope_router:
     app.include_router(agent_tool_scope_router)
 if credits_router:

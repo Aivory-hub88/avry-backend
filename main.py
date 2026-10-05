@@ -226,6 +226,20 @@ try:
 except Exception as e:
     print(f"[!] Agent roster routes failed: {e}")
 
+try:
+    from app.routes.active_agents import router as active_agents_router
+    app.include_router(active_agents_router)
+    print("[OK] Active agents routes registered")
+except Exception as e:
+    print(f"[!] Active agents routes failed: {e}")
+
+try:
+    from app.routes.teams import router as teams_router
+    app.include_router(teams_router)
+    print("[OK] Teams routes registered")
+except Exception as e:
+    print(f"[!] Teams routes failed: {e}")
+
 # The container runs THIS file (`python main.py`), not app/main.py, and only
 # app/main.py had ever registered this router — so every free-assessment lead
 # and funnel event POSTed by the landing site hit an unmounted path and came

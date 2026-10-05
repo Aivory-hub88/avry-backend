@@ -1,11 +1,12 @@
 """Shared FastAPI auth dependencies — JWT bearer validation."""
-import os
 from typing import Optional
 
 import jwt
 from fastapi import Header, HTTPException, Depends
 
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.token_kinds import is_access_payload
+
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
 
 
@@ -14,11 +15,15 @@ def current_payload(authorization: Optional[str] = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+    # Same secret signs refresh tokens; only access tokens are bearer credentials.
+    if not is_access_payload(payload):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return payload
 
 
 def require_admin(payload: dict = Depends(current_payload)) -> dict:

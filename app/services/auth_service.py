@@ -26,9 +26,26 @@ except ImportError:
     _PG_AVAILABLE = False
 
 # ── JWT config ────────────────────────────────────────────────────────────────
-JWT_SECRET = os.getenv("JWT_SECRET", "your-secret-key-change-in-production")
+from app.services.token_kinds import is_access_payload, is_refresh_payload
+
+from app.services.jwt_secret import JWT_SECRET
 JWT_ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60      # 1 hour (was 15 min)
+# Access tokens last 1 hour by default. They were raised to 12 hours as a
+# stopgap while cookie-based sessions couldn't refresh: the user dashboard
+# didn't update the aivory_access_token cookie after a client refresh, and
+# the admin dashboard couldn't refresh landing-login sessions at all. Both
+# refresh properly now (avry-user-dashboard#14, avry-admin-dashboard#1),
+# so the short lifetime is back and a leaked token is useful for an hour,
+# not half a day. Override with ACCESS_TOKEN_EXPIRE_MINUTES (5 min .. 24 h).
+def _access_ttl_minutes() -> int:
+    try:
+        value = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+    except ValueError:
+        value = 60
+    return max(5, min(value, 24 * 60))
+
+
+ACCESS_TOKEN_EXPIRE_MINUTES = _access_ttl_minutes()
 # Refresh window: 30 days SLIDING (was 7 days absolute). Every successful
 # refresh pushes the server-side session expiry out another 30 days, so an
 # active user never hits a login wall while an idle one ages out — the
@@ -74,6 +91,7 @@ class AuthService:
             "account_type": user.get("account_type", "free"),
             "full_name":    user.get("full_name"),
             "username":     user.get("username"),
+            "type":         "access",
             "exp": _now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
             "iat": _now(),
         }
@@ -83,16 +101,32 @@ class AuthService:
         payload = {
             "user_id":    user_id,
             "session_id": session_id,
+            "type":       "refresh",
             "exp": _now() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
             "iat": _now(),
         }
         return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-    def verify_token(self, token: str) -> Optional[dict]:
+    @staticmethod
+    def _decode(token: str) -> Optional[dict]:
         try:
             return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
             return None
+
+    def verify_token(self, token: str) -> Optional[dict]:
+        """Verify an ACCESS token (what every bearer-authenticated route needs).
+
+        Refresh tokens are rejected even though they share the signing
+        secret — see app/services/token_kinds.py.
+        """
+        payload = self._decode(token)
+        return payload if payload and is_access_payload(payload) else None
+
+    def verify_refresh_token(self, token: str) -> Optional[dict]:
+        """Verify a REFRESH token (refresh, logout); access tokens are rejected."""
+        payload = self._decode(token)
+        return payload if payload and is_refresh_payload(payload) else None
 
     # ── Tier helpers (unchanged logic) ───────────────────────────────────────
 
@@ -307,7 +341,7 @@ class AuthService:
         )
 
     async def refresh_access_token(self, refresh_token: str) -> TokenPair:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             raise ValueError("Invalid or expired refresh token")
 
@@ -363,7 +397,7 @@ class AuthService:
         )
 
     async def logout(self, refresh_token: str) -> bool:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             return False
 
@@ -397,7 +431,7 @@ class AuthService:
         return self._build_user_response(user)
 
     async def get_user_from_refresh_token(self, refresh_token: str) -> Optional[dict]:
-        payload = self.verify_token(refresh_token)
+        payload = self.verify_refresh_token(refresh_token)
         if not payload:
             return None
         pg_up = _PG_AVAILABLE and await pg.is_available()
