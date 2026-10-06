@@ -19,7 +19,7 @@ Product -> effect, following the pricing page and credit_service.TIER_ALLOWANCES
     enterprise    -> tier 'enterprise'  (3000 credits/mo)
     ai_snapshot   -> feature 'snapshot'
     ai_blueprint  -> feature 'blueprint'
-    ai_fullstack  -> features 'snapshot' + 'blueprint'
+    ai_fullstack  -> features 'snapshot' + 'blueprint', plus 1 month of tier 'business'
     credits_<n>   -> +n credits on top of the current balance
 """
 
@@ -67,6 +67,16 @@ FEATURE_PRODUCTS = {
     "ai_diagnostic": ("snapshot",),
     "ai_bundle": ("snapshot", "blueprint"),
     "full_stack": ("snapshot", "blueprint"),
+}
+
+# The bundle also carries one month of the Business plan (the pricing page
+# lists it: "Includes 1 month Business plan"). Applied on top of the features
+# above, never as a downgrade: an enterprise customer keeps their tier and
+# expiry untouched.
+BUNDLE_BONUS_TIER = {
+    "ai_fullstack": "business",
+    "ai_bundle": "business",
+    "full_stack": "business",
 }
 
 SUBSCRIPTION_DAYS = 31
@@ -226,6 +236,32 @@ def grant_entitlement(body: GrantRequest):
                     (body.user_id,),
                 )
                 detail.update({"granted_features": features, "features": row[0]})
+
+                bonus_tier = BUNDLE_BONUS_TIER.get(product)
+                if bonus_tier:
+                    cur.execute(
+                        """
+                        UPDATE identity.user_tiers
+                           SET tier = CASE WHEN tier IN ('enterprise', 'intelligence')
+                                           THEN tier ELSE %s END,
+                               expires_at = CASE WHEN tier IN ('enterprise', 'intelligence')
+                                                 THEN expires_at
+                                                 ELSE GREATEST(COALESCE(expires_at, now()), now())
+                                                      + make_interval(days => %s) END,
+                               updated_at = now()
+                         WHERE user_id = %s
+                        RETURNING tier, expires_at
+                        """,
+                        (bonus_tier, SUBSCRIPTION_DAYS, body.user_id),
+                    )
+                    trow = cur.fetchone()
+                    detail.update(
+                        {
+                            "bonus_tier": bonus_tier,
+                            "tier": trow[0],
+                            "expires_at": trow[1].isoformat() if trow[1] else None,
+                        }
+                    )
 
             cur.execute(
                 "UPDATE billing.entitlement_grants SET detail=%s WHERE order_id=%s",
