@@ -29,6 +29,7 @@ except ImportError:
 from app.services.token_kinds import is_access_payload, is_refresh_payload
 
 from app.services.jwt_secret import JWT_SECRET
+from app.services import tiers
 JWT_ALGORITHM = "HS256"
 # Access tokens last 1 hour by default. They were raised to 12 hours as a
 # stopgap while cookie-based sessions couldn't refresh: the user dashboard
@@ -138,8 +139,22 @@ class AuthService:
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=2000, credits_max=2000,
             )
+        partner_tier = self._partner_live_tier(user_id) if account_type == "partner" else None
+        if partner_tier:
+            # Distributor partner: Enterprise for the free months the admin
+            # dashboard granted, then whatever plan the partner subscribes to
+            # once that lapses — both live in user_tiers. Read here because
+            # this legacy computation never consults user_tiers, and the
+            # dashboard's paid gates read the tier it returns. With no live
+            # plan the partner falls through like any unsubscribed account.
+            allowance = tiers.TIER_ALLOWANCES[partner_tier]
+            return dict(
+                tier=partner_tier, is_subscribed=True,
+                has_diagnostic=True, has_snapshot=True, has_blueprint=True,
+                credits=allowance, credits_max=allowance,
+            )
 
-        payments    = self.db.load_all_json("payments")
+        payments   = self.db.load_all_json("payments")
         diagnostics = self.db.load_all_json("diagnostics")
         snapshots   = self.db.load_all_json("snapshots")
         blueprints  = self.db.load_all_json("blueprints")
@@ -169,6 +184,24 @@ class AuthService:
         return dict(tier="free", is_subscribed=False,
                     has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
                     has_blueprint=has_blueprint, credits=10, credits_max=10)
+
+    @staticmethod
+    def _partner_live_tier(user_id: str) -> Optional[str]:
+        """The partner's current plan: the free Enterprise period, a paid
+        subscription after it, or None once nothing is live.
+
+        An unreadable entitlement table (None) reports Enterprise: every
+        server-side gate re-reads user_tiers itself, so this only decides what
+        the dashboard shows, and a database blip should not make a partner's
+        dashboard look downgraded.
+        """
+        from app.services import entitlement_state
+
+        live = entitlement_state.get_entitlements(user_id)
+        if live is None:
+            return "enterprise"
+        tier = tiers.account_tier(live.get("tier"))
+        return None if tier == tiers.FREE_TIER else tier
 
     def _build_user_response(self, user: dict) -> UserResponse:
         user_id      = user.get("user_id") or user.get("id")

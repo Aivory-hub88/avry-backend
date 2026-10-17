@@ -205,7 +205,7 @@ def grant_entitlement(body: GrantRequest):
                 row = cur.fetchone()
                 cur.execute(
                     "UPDATE identity.users SET account_type='paid', updated_at=now() "
-                    "WHERE id=%s AND account_type NOT IN ('admin','superadmin')",
+                    "WHERE id=%s AND account_type NOT IN ('admin','superadmin','demo','partner')",
                     (body.user_id,),
                 )
                 detail.update({"tier": row[0], "expires_at": row[1].isoformat()})
@@ -232,7 +232,7 @@ def grant_entitlement(body: GrantRequest):
                 row = cur.fetchone()
                 cur.execute(
                     "UPDATE identity.users SET account_type='paid', updated_at=now() "
-                    "WHERE id=%s AND account_type NOT IN ('admin','superadmin')",
+                    "WHERE id=%s AND account_type NOT IN ('admin','superadmin','demo','partner')",
                     (body.user_id,),
                 )
                 detail.update({"granted_features": features, "features": row[0]})

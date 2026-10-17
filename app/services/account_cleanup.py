@@ -16,7 +16,7 @@ Two independent policies:
 
 "Never purchased" is read from `billing.payment_orders.status = 'paid'`
 (avry-payments' schema, same Postgres database) — not `account_type`, which
-can be stale or manually set. Staff accounts (admin/superadmin/demo) are
+can be stale or manually set. Staff accounts (admin/superadmin/demo/partner) are
 never eligible for either policy.
 
 Ships with `ACCOUNT_CLEANUP_ENABLED=false`: the poller still runs on its
@@ -46,7 +46,7 @@ POLICY_A_DELETE_AFTER_HOURS = 32
 # Policy B: days of grace after a subscription's expires_at passes.
 POLICY_B_GRACE_DAYS = 40
 
-_STAFF_ACCOUNT_TYPES = ("admin", "superadmin", "demo")
+_STAFF_ACCOUNT_TYPES = ("admin", "superadmin", "demo", "partner")
 
 _NO_PAID_ORDER_SQL = """
     NOT EXISTS (
@@ -75,7 +75,7 @@ async def check_payment_required(user_id: str) -> Optional[datetime]:
         SELECT created_at FROM users
         WHERE id = $1
           AND is_active = true
-          AND account_type NOT IN ('admin', 'superadmin', 'demo')
+          AND account_type NOT IN ('admin', 'superadmin', 'demo', 'partner')
           AND {_NO_PAID_ORDER_SQL}
         """,
         user_id,
@@ -90,7 +90,7 @@ async def _policy_a_warn_candidates(pool) -> list:
         f"""
         SELECT id, email, created_at FROM users
         WHERE is_active = true
-          AND account_type NOT IN ('admin', 'superadmin', 'demo')
+          AND account_type NOT IN ('admin', 'superadmin', 'demo', 'partner')
           AND cleanup_warned_at IS NULL
           AND created_at <= now() - make_interval(hours => {POLICY_A_WARN_AFTER_HOURS})
           AND created_at > now() - make_interval(hours => {POLICY_A_DELETE_AFTER_HOURS})
@@ -104,7 +104,7 @@ async def _policy_a_delete_candidates(pool) -> list:
         f"""
         SELECT id, email, account_type, created_at FROM users
         WHERE is_active = true
-          AND account_type NOT IN ('admin', 'superadmin', 'demo')
+          AND account_type NOT IN ('admin', 'superadmin', 'demo', 'partner')
           AND created_at <= now() - make_interval(hours => {POLICY_A_DELETE_AFTER_HOURS})
           AND {_NO_PAID_ORDER_SQL}
         """
@@ -163,7 +163,7 @@ async def _policy_b_warn_candidates(pool) -> list:
           AND t.expires_at <= now()
           AND t.lapse_warned_at IS NULL
           AND u.is_active = true
-          AND u.account_type NOT IN ('admin', 'superadmin', 'demo')
+          AND u.account_type NOT IN ('admin', 'superadmin', 'demo', 'partner')
         """
     )
 
@@ -177,7 +177,7 @@ async def _policy_b_delete_candidates(pool) -> list:
         WHERE t.expires_at IS NOT NULL
           AND t.expires_at <= now() - make_interval(days => {POLICY_B_GRACE_DAYS})
           AND u.is_active = true
-          AND u.account_type NOT IN ('admin', 'superadmin', 'demo')
+          AND u.account_type NOT IN ('admin', 'superadmin', 'demo', 'partner')
         """
     )
 
