@@ -44,12 +44,24 @@ class _FakeConn:
         return _Tx()
 
 
+class _Expiry:
+    def isoformat(self):
+        return "2027-03-17T00:00:00+00:00"
+
+
 class _FakePool:
-    def __init__(self):
+    def __init__(self, target=None):
         self.log = []
+        self.target = target  # row returned for a lookup by id
 
     async def fetchrow(self, sql, *args):
-        return None  # no existing user with this email
+        sql = " ".join(sql.split())
+        if sql.startswith("SELECT id FROM users WHERE email"):
+            return None  # no existing user with this email
+        if sql.startswith("SELECT id, account_type FROM users"):
+            return self.target
+        self.log.append((sql, args))
+        return {"expires_at": _Expiry()}
 
     def acquire(self):
         conn = _FakeConn(self.log)
@@ -72,14 +84,26 @@ def _token(account_type):
     )
 
 
-def _create(body, account_type="superadmin"):
-    pool = _FakePool()
-
+def _run(pool, coro_fn):
     async def get_pool():
         return pool
 
     with patch.object(admin_users.pg, "get_pool", get_pool):
-        result = asyncio.run(admin_users.create_admin_account(body, _token(account_type)))
+        return asyncio.run(coro_fn())
+
+
+def _create(body, account_type="superadmin"):
+    pool = _FakePool()
+    result = _run(pool, lambda: admin_users.create_admin_account(body, _token(account_type)))
+    return result, pool.log
+
+
+def _extend(body, target_type="partner", account_type="superadmin"):
+    pool = _FakePool(target={"id": "user_p", "account_type": target_type})
+    result = _run(
+        pool,
+        lambda: admin_users.extend_partner_access("user_p", body, _token(account_type)),
+    )
     return result, pool.log
 
 
@@ -88,6 +112,7 @@ PARTNER_BODY = {
     "password": "Str0ng!pass",
     "accountType": "partner",
     "companyName": "PT Distributor Contoh",
+    "freeMonths": 3,
 }
 
 
@@ -103,9 +128,17 @@ class CreatePartner(unittest.TestCase):
         self.assertEqual(user_insert[1][5], "PT Distributor Contoh")
 
         self.assertIn("INSERT INTO user_tiers", tier_insert[0])
-        self.assertIn("NULL", tier_insert[0])  # never expires
+        self.assertIn("make_interval(months => $4)", tier_insert[0])
         self.assertEqual(tier_insert[1][1], "enterprise")
         self.assertEqual(json.loads(tier_insert[1][2]), ["snapshot", "blueprint"])
+        self.assertEqual(tier_insert[1][3], 3)
+
+    def test_free_months_must_be_an_offered_option(self):
+        for months in (None, 0, 2, 12, "3", True):
+            body = dict(PARTNER_BODY, freeMonths=months)
+            with self.assertRaises(HTTPException) as ctx:
+                _create(body)
+            self.assertEqual(ctx.exception.status_code, 400, months)
 
     def test_admin_cannot_create_partner(self):
         with self.assertRaises(HTTPException) as ctx:
@@ -125,13 +158,45 @@ class CreatePartner(unittest.TestCase):
         self.assertIn("INSERT INTO users", log[0][0])
 
 
+class ExtendPartner(unittest.TestCase):
+    def test_extends_from_later_of_expiry_and_now(self):
+        result, log = _extend({"freeMonths": 5})
+        self.assertEqual(result["partnerExpiresAt"], "2027-03-17T00:00:00+00:00")
+        (sql, args), = log
+        self.assertIn("GREATEST(COALESCE(user_tiers.expires_at, now()), now())", sql)
+        self.assertEqual(args[1], "enterprise")
+        self.assertEqual(args[3], 5)
+
+    def test_only_superadmin(self):
+        with self.assertRaises(HTTPException) as ctx:
+            _extend({"freeMonths": 1}, account_type="admin")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+    def test_only_partner_accounts(self):
+        with self.assertRaises(HTTPException) as ctx:
+            _extend({"freeMonths": 1}, target_type="free")
+        self.assertEqual(ctx.exception.status_code, 400)
+
+
 class PartnerTier(unittest.TestCase):
-    def test_partner_resolves_to_enterprise(self):
-        svc = AuthService.__new__(AuthService)  # _compute_tier needs no state for partners
-        info = svc._compute_tier("user_x", "partner")
+    def _tier(self, live):
+        svc = AuthService.__new__(AuthService)
+        svc.db = type("Db", (), {"load_all_json": staticmethod(lambda name: [])})()
+        with patch("app.services.entitlement_state.get_entitlements", return_value=live):
+            return svc._compute_tier("user_x", "partner")
+
+    def test_partner_in_free_period_is_enterprise(self):
+        info = self._tier({"tier": "enterprise", "features": [], "found": True})
         self.assertEqual(info["tier"], "enterprise")
         self.assertTrue(info["is_subscribed"])
         self.assertTrue(info["has_snapshot"] and info["has_blueprint"])
+
+    def test_lapsed_partner_is_free(self):
+        info = self._tier({"tier": None, "features": [], "expired": True, "found": True})
+        self.assertEqual(info["tier"], "free")
+
+    def test_unreadable_entitlements_keep_access(self):
+        self.assertEqual(self._tier(None)["tier"], "enterprise")
 
 
 if __name__ == "__main__":

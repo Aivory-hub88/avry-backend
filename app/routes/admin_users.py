@@ -33,13 +33,17 @@ JWT_ALGORITHM = "HS256"
 # that stays superadmin-only (avry-user-dashboard `canUseAivoryN8nInstance`).
 MANAGED_ACCOUNT_TYPES = ("admin", "superadmin", "demo", "partner")
 
-# What a partner account is granted at creation. It is written as a regular
-# `user_tiers` row (no expiry) rather than special-cased per gate, so every
-# tier check that already understands Enterprise — credits, agents, MCP
-# servers, schedules — treats a partner exactly like an Enterprise customer
-# without each one learning a new account type.
+# What a partner account is granted. It is written as a regular `user_tiers`
+# row rather than special-cased per gate, so every tier check that already
+# understands Enterprise — credits, agents, MCP servers, schedules — treats a
+# partner exactly like an Enterprise customer without each one learning a new
+# account type. The access is free for a fixed number of months; once
+# `expires_at` passes the account drops to free like any lapsed subscription
+# (partners are exempt from the lapsed-account cleanup, so nothing is deleted)
+# and a superadmin can extend it.
 PARTNER_TIER = "enterprise"
 PARTNER_FEATURES = ["snapshot", "blueprint"]
+PARTNER_FREE_MONTH_OPTIONS = (1, 3, 5)
 
 # Sidebar/module keys a demo account may be granted access to. Mirrors
 # DEMO_ALLOWED_NAV_KEYS in avry-user-dashboard's lib/moduleAccess.ts — keep in
@@ -136,11 +140,13 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
     pool = await pg.get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, email, account_type, company_name, is_active, allowed_modules,
-               created_at, updated_at
-        FROM users
-        WHERE account_type IN ('admin', 'superadmin', 'demo', 'partner')
-        ORDER BY created_at DESC
+        SELECT u.id, u.email, u.account_type, u.company_name, u.is_active,
+               u.allowed_modules, u.created_at, u.updated_at,
+               CASE WHEN u.account_type = 'partner' THEN t.expires_at END AS partner_expires_at
+        FROM users u
+        LEFT JOIN user_tiers t ON t.user_id = u.id
+        WHERE u.account_type IN ('admin', 'superadmin', 'demo', 'partner')
+        ORDER BY u.created_at DESC
         """
     )
 
@@ -148,6 +154,9 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
     for row in rows:
         is_active = row["is_active"]
         email = row["email"]
+        partner_expires_at = (
+            row["partner_expires_at"].isoformat() if row["partner_expires_at"] else None
+        )
         allowed_modules = row["allowed_modules"]
         admins.append({
             # camelCase (for Settings page)
@@ -156,6 +165,7 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
             "fullName": email.split("@")[0],
             "accountType": row["account_type"],
             "companyName": row["company_name"],
+            "partnerExpiresAt": partner_expires_at,
             "isActive": is_active,
             "status": "active" if is_active else "suspended",
             "allowedModules": allowed_modules,
@@ -165,6 +175,7 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
             "full_name": email.split("@")[0],
             "account_type": row["account_type"],
             "company_name": row["company_name"],
+            "partner_expires_at": partner_expires_at,
             "allowed_modules": allowed_modules,
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "created_by": "system",
@@ -192,7 +203,7 @@ async def create_admin_account(
       superadmin. The frontend passes `accountType: "demo"`.
     - `partner` accounts (distributor partners): superadmin only, since they
       carry the Enterprise feature set without paying. `companyName` (the
-      distributor) is required.
+      distributor) and `freeMonths` (1, 3 or 5) are required.
     """
     payload = await require_admin(authorization)
 
@@ -218,6 +229,7 @@ async def create_admin_account(
     company_name = (body.get("companyName") or "").strip() or None
     if account_type == "partner" and not company_name:
         raise HTTPException(status_code=400, detail="companyName is required for partner accounts")
+    free_months = _partner_free_months(body) if account_type == "partner" else None
 
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
@@ -267,12 +279,12 @@ async def create_admin_account(
                 await conn.execute(
                     """
                     INSERT INTO user_tiers (user_id, tier, features, expires_at, updated_at)
-                    VALUES ($1, $2, $3::jsonb, NULL, now())
+                    VALUES ($1, $2, $3::jsonb, now() + make_interval(months => $4), now())
                     ON CONFLICT (user_id) DO UPDATE
                        SET tier = EXCLUDED.tier, features = EXCLUDED.features,
-                           expires_at = NULL, updated_at = now()
+                           expires_at = EXCLUDED.expires_at, updated_at = now()
                     """,
-                    user_id, PARTNER_TIER, json.dumps(PARTNER_FEATURES),
+                    user_id, PARTNER_TIER, json.dumps(PARTNER_FEATURES), free_months,
                 )
 
     return {
@@ -282,6 +294,7 @@ async def create_admin_account(
             "email": email,
             "accountType": account_type,
             "companyName": company_name,
+            "freeMonths": free_months,
             "isActive": True,
             "allowedModules": allowed_modules,
         },
@@ -571,7 +584,67 @@ async def update_account_modules(
     return {"success": True, "allowedModules": allowed_modules}
 
 
+# ── PATCH /api/v1/admin/admin-accounts/{id}/partner-access ───────────────────
+
+
+@router.patch("/admin-accounts/{user_id}/partner-access")
+async def extend_partner_access(
+    user_id: str,
+    body: dict,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Add `freeMonths` (1, 3 or 5) of free Enterprise access to a partner.
+
+    Extends from whichever is later, the current expiry or now, so extending
+    early never shortens the access and extending a lapsed partner starts
+    from today. Superadmin only, same as creating the partner.
+    """
+    payload = await require_admin(authorization)
+    if payload.get("account_type") != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmins can extend partner access")
+
+    free_months = _partner_free_months(body or {})
+
+    pool = await pg.get_pool()
+    target = await pool.fetchrow(
+        "SELECT id, account_type FROM users WHERE id = $1", user_id
+    )
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target["account_type"] != "partner":
+        raise HTTPException(status_code=400, detail="Free access can only be extended for partner accounts")
+
+    row = await pool.fetchrow(
+        """
+        INSERT INTO user_tiers (user_id, tier, features, expires_at, updated_at)
+        VALUES ($1, $2, $3::jsonb, now() + make_interval(months => $4), now())
+        ON CONFLICT (user_id) DO UPDATE
+           SET tier = EXCLUDED.tier,
+               features = EXCLUDED.features,
+               expires_at = GREATEST(COALESCE(user_tiers.expires_at, now()), now())
+                            + make_interval(months => $4),
+               lapse_warned_at = NULL,
+               updated_at = now()
+        RETURNING expires_at
+        """,
+        user_id, PARTNER_TIER, json.dumps(PARTNER_FEATURES), free_months,
+    )
+
+    return {"success": True, "partnerExpiresAt": row["expires_at"].isoformat()}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _partner_free_months(body: dict) -> int:
+    """Validate the free-access duration the admin picked for a partner."""
+    months = body.get("freeMonths")
+    # bool is an int subclass; `true` must not read as one month.
+    if isinstance(months, bool) or months not in PARTNER_FREE_MONTH_OPTIONS:
+        options = ", ".join(str(m) for m in PARTNER_FREE_MONTH_OPTIONS)
+        raise HTTPException(status_code=400, detail=f"freeMonths must be one of: {options}")
+    return months
 
 
 def _generate_password(length: int = 16) -> str:

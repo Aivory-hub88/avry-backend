@@ -139,11 +139,12 @@ class AuthService:
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=2000, credits_max=2000,
             )
-        if account_type == "partner":
-            # Distributor partner: the Enterprise feature set, granted by the
-            # admin dashboard as a non-expiring user_tiers row. Stated here too
-            # because this legacy computation never reads user_tiers, and the
-            # dashboard's paid gates read the tier it returns.
+        if account_type == "partner" and self._partner_access_live(user_id):
+            # Distributor partner: the Enterprise feature set for the free
+            # months the admin dashboard granted as a user_tiers row. Read here
+            # too because this legacy computation never consults user_tiers,
+            # and the dashboard's paid gates read the tier it returns. Once the
+            # free period lapses the partner falls through to the free path.
             allowance = tiers.TIER_ALLOWANCES["enterprise"]
             return dict(
                 tier="enterprise", is_subscribed=True,
@@ -181,6 +182,22 @@ class AuthService:
         return dict(tier="free", is_subscribed=False,
                     has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
                     has_blueprint=has_blueprint, credits=10, credits_max=10)
+
+    @staticmethod
+    def _partner_access_live(user_id: str) -> bool:
+        """True while the partner's free Enterprise period has not lapsed.
+
+        An unreadable entitlement table (None) keeps the access: every
+        server-side gate re-reads user_tiers itself, so this only decides what
+        the dashboard shows, and a database blip should not make a partner's
+        dashboard look downgraded.
+        """
+        from app.services import entitlement_state
+
+        live = entitlement_state.get_entitlements(user_id)
+        if live is None:
+            return True
+        return tiers.meets(live.get("tier"), "enterprise")
 
     def _build_user_response(self, user: dict) -> UserResponse:
         user_id      = user.get("user_id") or user.get("id")
