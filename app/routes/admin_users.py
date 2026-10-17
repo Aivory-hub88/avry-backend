@@ -5,6 +5,7 @@ Provides endpoints for the admin dashboard to list all users,
 list admin accounts, create/suspend/reactivate admin accounts.
 """
 
+import json
 import secrets
 import string
 import logging
@@ -27,7 +28,18 @@ JWT_ALGORITHM = "HS256"
 # `demo` accounts are limited product users (created for demos/tests) — they are
 # created and listed alongside admins so superadmins manage them in one place,
 # but the product itself restricts a demo login to a fixed set of modules.
-MANAGED_ACCOUNT_TYPES = ("admin", "superadmin", "demo")
+# `partner` accounts are for distributor partners: every user-dashboard feature
+# at the Enterprise tier, but never Aivory's own self-hosted n8n instance —
+# that stays superadmin-only (avry-user-dashboard `canUseAivoryN8nInstance`).
+MANAGED_ACCOUNT_TYPES = ("admin", "superadmin", "demo", "partner")
+
+# What a partner account is granted at creation. It is written as a regular
+# `user_tiers` row (no expiry) rather than special-cased per gate, so every
+# tier check that already understands Enterprise — credits, agents, MCP
+# servers, schedules — treats a partner exactly like an Enterprise customer
+# without each one learning a new account type.
+PARTNER_TIER = "enterprise"
+PARTNER_FEATURES = ["snapshot", "blueprint"]
 
 # Sidebar/module keys a demo account may be granted access to. Mirrors
 # DEMO_ALLOWED_NAV_KEYS in avry-user-dashboard's lib/moduleAccess.ts — keep in
@@ -124,9 +136,10 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
     pool = await pg.get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, email, account_type, is_active, allowed_modules, created_at, updated_at
+        SELECT id, email, account_type, company_name, is_active, allowed_modules,
+               created_at, updated_at
         FROM users
-        WHERE account_type IN ('admin', 'superadmin', 'demo')
+        WHERE account_type IN ('admin', 'superadmin', 'demo', 'partner')
         ORDER BY created_at DESC
         """
     )
@@ -142,6 +155,7 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
             "email": email,
             "fullName": email.split("@")[0],
             "accountType": row["account_type"],
+            "companyName": row["company_name"],
             "isActive": is_active,
             "status": "active" if is_active else "suspended",
             "allowedModules": allowed_modules,
@@ -150,6 +164,7 @@ async def list_admin_accounts(authorization: Optional[str] = Header(None)):
             # snake_case (for AdminTable component)
             "full_name": email.split("@")[0],
             "account_type": row["account_type"],
+            "company_name": row["company_name"],
             "allowed_modules": allowed_modules,
             "created_at": row["created_at"].isoformat() if row["created_at"] else None,
             "created_by": "system",
@@ -175,6 +190,9 @@ async def create_admin_account(
     - `admin` / `superadmin` accounts: superadmin only.
     - `demo` accounts (limited product users for demos/tests): any admin or
       superadmin. The frontend passes `accountType: "demo"`.
+    - `partner` accounts (distributor partners): superadmin only, since they
+      carry the Enterprise feature set without paying. `companyName` (the
+      distributor) is required.
     """
     payload = await require_admin(authorization)
 
@@ -188,13 +206,18 @@ async def create_admin_account(
     if account_type not in MANAGED_ACCOUNT_TYPES:
         raise HTTPException(
             status_code=400,
-            detail="accountType must be 'admin', 'superadmin', or 'demo'",
+            detail="accountType must be 'admin', 'superadmin', 'demo', or 'partner'",
         )
 
-    # Only superadmins can mint other privileged (admin/superadmin) accounts.
-    # Demo accounts are low-privilege and may be created by any admin.
-    if account_type in ("admin", "superadmin") and payload.get("account_type") != "superadmin":
-        raise HTTPException(status_code=403, detail="Only superadmins can create admin accounts")
+    # Only superadmins can mint other privileged (admin/superadmin) accounts,
+    # or partner accounts, which hold a paid tier for free. Demo accounts are
+    # low-privilege and may be created by any admin.
+    if account_type in ("admin", "superadmin", "partner") and payload.get("account_type") != "superadmin":
+        raise HTTPException(status_code=403, detail=f"Only superadmins can create {account_type} accounts")
+
+    company_name = (body.get("companyName") or "").strip() or None
+    if account_type == "partner" and not company_name:
+        raise HTTPException(status_code=400, detail="companyName is required for partner accounts")
 
     if len(password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters long")
@@ -227,15 +250,30 @@ async def create_admin_account(
     # Hash password
     password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
 
-    # Create user
+    # Create user (and, for a partner, its Enterprise entitlement) in one
+    # transaction, so a partner can never exist without its access.
     user_id = generate_id("user")
-    await pool.execute(
-        """
-        INSERT INTO users (id, email, password_hash, account_type, is_active, allowed_modules)
-        VALUES ($1, $2, $3, $4, true, $5)
-        """,
-        user_id, email, password_hash, account_type, allowed_modules,
-    )
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO users (id, email, password_hash, account_type, is_active,
+                                   allowed_modules, company_name)
+                VALUES ($1, $2, $3, $4, true, $5, $6)
+                """,
+                user_id, email, password_hash, account_type, allowed_modules, company_name,
+            )
+            if account_type == "partner":
+                await conn.execute(
+                    """
+                    INSERT INTO user_tiers (user_id, tier, features, expires_at, updated_at)
+                    VALUES ($1, $2, $3::jsonb, NULL, now())
+                    ON CONFLICT (user_id) DO UPDATE
+                       SET tier = EXCLUDED.tier, features = EXCLUDED.features,
+                           expires_at = NULL, updated_at = now()
+                    """,
+                    user_id, PARTNER_TIER, json.dumps(PARTNER_FEATURES),
+                )
 
     return {
         "success": True,
@@ -243,6 +281,7 @@ async def create_admin_account(
             "id": user_id,
             "email": email,
             "accountType": account_type,
+            "companyName": company_name,
             "isActive": True,
             "allowedModules": allowed_modules,
         },
@@ -550,4 +589,5 @@ def _get_credits_max(account_type: str) -> int:
         "enterprise": 2000,
         "superadmin": 2000,
         "admin": 500,
+        "partner": 3000,  # Enterprise allowance, see PARTNER_TIER
     }.get(account_type, 10)

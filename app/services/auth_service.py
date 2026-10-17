@@ -29,6 +29,7 @@ except ImportError:
 from app.services.token_kinds import is_access_payload, is_refresh_payload
 
 from app.services.jwt_secret import JWT_SECRET
+from app.services import tiers
 JWT_ALGORITHM = "HS256"
 # Access tokens last 1 hour by default. They were raised to 12 hours as a
 # stopgap while cookie-based sessions couldn't refresh: the user dashboard
@@ -138,8 +139,19 @@ class AuthService:
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=2000, credits_max=2000,
             )
+        if account_type == "partner":
+            # Distributor partner: the Enterprise feature set, granted by the
+            # admin dashboard as a non-expiring user_tiers row. Stated here too
+            # because this legacy computation never reads user_tiers, and the
+            # dashboard's paid gates read the tier it returns.
+            allowance = tiers.TIER_ALLOWANCES["enterprise"]
+            return dict(
+                tier="enterprise", is_subscribed=True,
+                has_diagnostic=True, has_snapshot=True, has_blueprint=True,
+                credits=allowance, credits_max=allowance,
+            )
 
-        payments    = self.db.load_all_json("payments")
+        payments   = self.db.load_all_json("payments")
         diagnostics = self.db.load_all_json("diagnostics")
         snapshots   = self.db.load_all_json("snapshots")
         blueprints  = self.db.load_all_json("blueprints")
