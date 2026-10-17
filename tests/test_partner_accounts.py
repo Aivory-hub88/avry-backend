@@ -191,6 +191,11 @@ class PartnerTier(unittest.TestCase):
         self.assertTrue(info["is_subscribed"])
         self.assertTrue(info["has_snapshot"] and info["has_blueprint"])
 
+    def test_partner_who_subscribed_after_lapse_keeps_that_plan(self):
+        info = self._tier({"tier": "business", "features": [], "found": True})
+        self.assertEqual(info["tier"], "business")
+        self.assertEqual(info["credits_max"], 220)
+
     def test_lapsed_partner_is_free(self):
         info = self._tier({"tier": None, "features": [], "expired": True, "found": True})
         self.assertEqual(info["tier"], "free")

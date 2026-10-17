@@ -37,10 +37,11 @@ MANAGED_ACCOUNT_TYPES = ("admin", "superadmin", "demo", "partner")
 # row rather than special-cased per gate, so every tier check that already
 # understands Enterprise — credits, agents, MCP servers, schedules — treats a
 # partner exactly like an Enterprise customer without each one learning a new
-# account type. The access is free for a fixed number of months; once
-# `expires_at` passes the account drops to free like any lapsed subscription
-# (partners are exempt from the lapsed-account cleanup, so nothing is deleted)
-# and a superadmin can extend it.
+# account type. The access is free for a fixed number of months; after
+# `expires_at` the partner keeps going on a paid subscription (and buys
+# Intelligence Credits) like any customer, or a superadmin extends the free
+# period. Partners are exempt from the lapsed-account cleanup, so a lapse
+# never deletes the account.
 PARTNER_TIER = "enterprise"
 PARTNER_FEATURES = ["snapshot", "blueprint"]
 PARTNER_FREE_MONTH_OPTIONS = (1, 3, 5)

@@ -139,15 +139,17 @@ class AuthService:
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=2000, credits_max=2000,
             )
-        if account_type == "partner" and self._partner_access_live(user_id):
-            # Distributor partner: the Enterprise feature set for the free
-            # months the admin dashboard granted as a user_tiers row. Read here
-            # too because this legacy computation never consults user_tiers,
-            # and the dashboard's paid gates read the tier it returns. Once the
-            # free period lapses the partner falls through to the free path.
-            allowance = tiers.TIER_ALLOWANCES["enterprise"]
+        partner_tier = self._partner_live_tier(user_id) if account_type == "partner" else None
+        if partner_tier:
+            # Distributor partner: Enterprise for the free months the admin
+            # dashboard granted, then whatever plan the partner subscribes to
+            # once that lapses — both live in user_tiers. Read here because
+            # this legacy computation never consults user_tiers, and the
+            # dashboard's paid gates read the tier it returns. With no live
+            # plan the partner falls through like any unsubscribed account.
+            allowance = tiers.TIER_ALLOWANCES[partner_tier]
             return dict(
-                tier="enterprise", is_subscribed=True,
+                tier=partner_tier, is_subscribed=True,
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=allowance, credits_max=allowance,
             )
@@ -184,10 +186,11 @@ class AuthService:
                     has_blueprint=has_blueprint, credits=10, credits_max=10)
 
     @staticmethod
-    def _partner_access_live(user_id: str) -> bool:
-        """True while the partner's free Enterprise period has not lapsed.
+    def _partner_live_tier(user_id: str) -> Optional[str]:
+        """The partner's current plan: the free Enterprise period, a paid
+        subscription after it, or None once nothing is live.
 
-        An unreadable entitlement table (None) keeps the access: every
+        An unreadable entitlement table (None) reports Enterprise: every
         server-side gate re-reads user_tiers itself, so this only decides what
         the dashboard shows, and a database blip should not make a partner's
         dashboard look downgraded.
@@ -196,8 +199,9 @@ class AuthService:
 
         live = entitlement_state.get_entitlements(user_id)
         if live is None:
-            return True
-        return tiers.meets(live.get("tier"), "enterprise")
+            return "enterprise"
+        tier = tiers.account_tier(live.get("tier"))
+        return None if tier == tiers.FREE_TIER else tier
 
     def _build_user_response(self, user: dict) -> UserResponse:
         user_id      = user.get("user_id") or user.get("id")
