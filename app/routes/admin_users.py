@@ -128,7 +128,7 @@ async def list_users(authorization: Optional[str] = Header(None)):
             # activated; there is no free product. It used to echo
             # account_type, which showed every customer as "free"/"paid".
             "tier": _live_plan(row["account_type"], row["live_tier"], row["features"]),
-            "planExpiresAt": row["expires_at"].isoformat() if row["expires_at"] else None,
+            "tierExpiresAt": row["expires_at"].isoformat() if row["expires_at"] else None,
             "creditsUsed": 0,
             "creditsMax": _get_credits_max(row["account_type"]),
             "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
