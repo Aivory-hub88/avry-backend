@@ -16,7 +16,7 @@ import bcrypt
 from fastapi import APIRouter, HTTPException, Header, Query
 
 from app.database import pg_service as pg
-from app.services import demo_data_cleanup, password_reset_service
+from app.services import demo_data_cleanup, password_reset_service, tiers
 from app.utils.id_generator import generate_id
 
 logger = logging.getLogger(__name__)
@@ -105,10 +105,13 @@ async def list_users(authorization: Optional[str] = Header(None)):
     pool = await pg.get_pool()
     rows = await pool.fetch(
         """
-        SELECT id, email, account_type, company_name, is_active,
-               created_at, updated_at
-        FROM users
-        ORDER BY created_at DESC
+        SELECT u.id, u.email, u.account_type, u.company_name, u.is_active,
+               u.created_at, u.updated_at,
+               CASE WHEN t.expires_at IS NULL OR t.expires_at > now() THEN t.tier END AS live_tier,
+               t.expires_at, t.features
+        FROM users u
+        LEFT JOIN user_tiers t ON t.user_id = u.id
+        ORDER BY u.created_at DESC
         """
     )
 
@@ -120,7 +123,12 @@ async def list_users(authorization: Optional[str] = Header(None)):
             "accountType": row["account_type"],
             "companyName": row["company_name"],
             "isActive": row["is_active"],
-            "tier": row["account_type"],  # simplified — tier = account_type for now
+            # The plan the account holds right now, from user_tiers (where
+            # payments land). `free` means no live plan — the account is not
+            # activated; there is no free product. It used to echo
+            # account_type, which showed every customer as "free"/"paid".
+            "tier": _live_plan(row["account_type"], row["live_tier"], row["features"]),
+            "planExpiresAt": row["expires_at"].isoformat() if row["expires_at"] else None,
             "creditsUsed": 0,
             "creditsMax": _get_credits_max(row["account_type"]),
             "createdAt": row["created_at"].isoformat() if row["created_at"] else None,
@@ -652,6 +660,30 @@ def _generate_password(length: int = 16) -> str:
     """Generate a strong random password (letters, digits, symbols)."""
     alphabet = string.ascii_letters + string.digits + "!@#$%^&*()_+-="
     return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def _live_plan(account_type: Optional[str], live_tier: Optional[str], features=None) -> str:
+    """
+    The plan to show in the admin user list: a live subscription, else a
+    one-time purchase (blueprint outranks snapshot), else `free` = not
+    activated. A partner's snapshot/blueprint features come with its free
+    period, so they don't count once that lapses. Superadmins hold Enterprise.
+    """
+    if account_type == "superadmin":
+        return "enterprise"
+    plan = tiers.account_tier(live_tier)
+    if plan != tiers.FREE_TIER or account_type == "partner":
+        return plan
+    if isinstance(features, str):
+        try:
+            features = json.loads(features)
+        except ValueError:
+            features = None
+    bought = set(features or [])
+    for feature in ("blueprint", "snapshot"):
+        if feature in bought:
+            return feature
+    return tiers.FREE_TIER
 
 
 def _get_credits_max(account_type: str) -> int:
