@@ -206,3 +206,17 @@ class PartnerTier(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AdminUserListPlan(unittest.TestCase):
+    def test_live_plan(self):
+        plan = admin_users._live_plan
+        self.assertEqual(plan("paid", "business"), "business")
+        self.assertEqual(plan("paid", "pro"), "business")  # pre-rebrand alias
+        self.assertEqual(plan("paid", None, ["snapshot"]), "snapshot")
+        self.assertEqual(plan("paid", None, '["snapshot", "blueprint"]'), "blueprint")
+        self.assertEqual(plan("paid", None, None), "free")  # lapsed: not activated
+        self.assertEqual(plan("free", None, []), "free")
+        self.assertEqual(plan("partner", "enterprise", ["snapshot", "blueprint"]), "enterprise")
+        self.assertEqual(plan("partner", None, ["snapshot", "blueprint"]), "free")
+        self.assertEqual(plan("superadmin", None), "enterprise")
