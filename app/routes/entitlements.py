@@ -14,8 +14,9 @@ insert happens in the same transaction as the effect, so a crash rolls back both
 
 Product -> effect, following the pricing page and credit_service.TIER_ALLOWANCES:
 
-    operational   -> tier 'operational' (80 credits/mo)
-    business      -> tier 'business'    (220 credits/mo)
+    operational   -> tier 'operational' (80 credits/mo), 31 days
+    business      -> tier 'business'    (220 credits/mo), 31 days
+    operational_annual / business_annual -> the same tier for 365 days
     enterprise    -> tier 'enterprise'  (3000 credits/mo)
     ai_snapshot   -> feature 'snapshot'
     ai_blueprint  -> feature 'blueprint'
@@ -49,6 +50,10 @@ TIER_PRODUCTS = {
     "operational": "operational",
     "business": "business",
     "enterprise": "enterprise",
+    # Annual billing: the same tier, paid for a year up front (see
+    # ANNUAL_PRODUCTS for the length). Priced in avry-payments' pricing.py.
+    "operational_annual": "operational",
+    "business_annual": "business",
     # Legacy product ids -> their canonical tier.
     "foundation": "operational",
     "pro": "business",
@@ -80,6 +85,13 @@ BUNDLE_BONUS_TIER = {
 }
 
 SUBSCRIPTION_DAYS = 31
+ANNUAL_SUBSCRIPTION_DAYS = 365
+ANNUAL_PRODUCTS = frozenset({"operational_annual", "business_annual"})
+
+
+def _subscription_days(product: str) -> int:
+    """How long one purchase of a subscription product lasts."""
+    return ANNUAL_SUBSCRIPTION_DAYS if product in ANNUAL_PRODUCTS else SUBSCRIPTION_DAYS
 
 _SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS billing;
@@ -186,6 +198,7 @@ def grant_entitlement(body: GrantRequest):
 
             if product in TIER_PRODUCTS:
                 tier = TIER_PRODUCTS[product]
+                days = _subscription_days(product)
                 cur.execute(
                     """
                     INSERT INTO identity.user_tiers (user_id, tier, expires_at, updated_at)
@@ -200,7 +213,7 @@ def grant_entitlement(body: GrantRequest):
                            updated_at = now()
                     RETURNING tier, expires_at
                     """,
-                    (body.user_id, tier, SUBSCRIPTION_DAYS, SUBSCRIPTION_DAYS),
+                    (body.user_id, tier, days, days),
                 )
                 row = cur.fetchone()
                 cur.execute(
