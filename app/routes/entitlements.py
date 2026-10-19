@@ -33,7 +33,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from app.services import credit_service
+from app.routes.deps import current_payload
+from app.services import credit_service, feature_uses
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,10 @@ def grant_entitlement(body: GrantRequest):
                     (body.user_id,),
                 )
                 detail.update({"granted_features": features, "features": row[0]})
+                # Each one-time product includes feature_uses.USES_PER_PURCHASE
+                # runs (the Complete package: that many full cycles).
+                feature_uses.grant_purchase(cur, body.user_id, features, body.order_id)
+                detail["uses_granted"] = feature_uses.USES_PER_PURCHASE
 
                 bonus_tier = BUNDLE_BONUS_TIER.get(product)
                 if bonus_tier:
@@ -353,3 +358,53 @@ def list_grants(user_id: str):
             for r in rows
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Runs left on what the customer bought (see app/services/feature_uses.py)
+# ---------------------------------------------------------------------------
+
+
+class ConsumeRequest(BaseModel):
+    feature: str = Field(pattern="^(snapshot|blueprint)$")
+    # The generator's job id: charging the same finished job again is a no-op.
+    ref: str = Field(min_length=1, max_length=200)
+
+
+def _caller_id(payload: dict) -> str:
+    user_id = payload.get("user_id") or payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    return user_id
+
+
+@router.get("/uses")
+def get_uses(payload: dict = Depends(current_payload)):
+    """How many runs of each feature the caller has left."""
+    try:
+        return {"ok": True, "uses": feature_uses.status(_caller_id(payload))}
+    except Exception as e:
+        logger.error("Feature-use lookup failed: %s", e)
+        raise HTTPException(status_code=503, detail="Usage service unavailable")
+
+
+@router.post("/uses/consume")
+def consume_use(body: ConsumeRequest, payload: dict = Depends(current_payload)):
+    """
+    Charge one run for a finished job. Called by the dashboard's result routes
+    just before they hand the result over; 402 means the result must not be
+    delivered. A customer calling this themselves can only spend their own runs.
+    """
+    try:
+        result = feature_uses.consume(_caller_id(payload), body.feature, body.ref)
+    except feature_uses.NoUsesLeft:
+        raise HTTPException(
+            status_code=402,
+            detail=f"You have used all {feature_uses.USES_PER_PURCHASE} runs included with your purchase.",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Feature-use charge failed: %s", e)
+        raise HTTPException(status_code=503, detail="Usage service unavailable")
+    return {"ok": True, **result}
