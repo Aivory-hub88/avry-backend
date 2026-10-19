@@ -207,6 +207,16 @@ class AuthService:
         user_id      = user.get("user_id") or user.get("id")
         account_type = user.get("account_type", "free")
         tier_info    = self._compute_tier(user_id, account_type)
+        # Payments land in Postgres (user_tiers / user_credits), which the
+        # legacy computation above never reads, so a paying customer was
+        # reported as `free`. Overlay what is live. Superadmins are already
+        # Enterprise. Partners are resolved from user_tiers in _compute_tier;
+        # the overlay would also count their free-period snapshot/blueprint
+        # features as a paid `blueprint` tier after the period lapses.
+        if account_type not in ("superadmin", "partner"):
+            from app.services import entitlement_state
+
+            tier_info = entitlement_state.overlay(tier_info, user_id)
 
         created = user.get("created_at")
         if isinstance(created, str):
