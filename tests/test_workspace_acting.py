@@ -89,7 +89,11 @@ class DiscussionTurnRouteTest(unittest.TestCase):
         def route(record, agent_type, space, root, text, allow_approval_text=True):
             seen["tenant"] = record["user_id"]
             seen["allow_approval_text"] = allow_approval_text
-            return {"reply": "ok", "pending_approval": None}
+            return {
+                "reply": "ok",
+                "pending_approval": None,
+                "team_actions": [{"kind": "ask", "to": "Lex", "text": "Qualified?"}],
+            }
 
         with (
             patch.object(tg.workspace_acting, "can_act_as", return_value=can_act) as gate,
@@ -99,6 +103,10 @@ class DiscussionTurnRouteTest(unittest.TestCase):
         ):
             out = tg.discussion_turn(body, user={"user_id": member_id})
         return out, seen, gate
+
+    def test_team_actions_are_relayed_to_the_room(self):
+        out, _, _ = self.call("leader")
+        self.assertEqual(out["team_actions"], [{"kind": "ask", "to": "Lex", "text": "Qualified?"}])
 
     def test_member_turn_runs_in_leader_tenant(self):
         out, seen, gate = self.call("leader")

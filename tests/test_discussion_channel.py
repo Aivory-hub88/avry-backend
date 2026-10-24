@@ -76,7 +76,7 @@ class DiscussionChannelTest(unittest.TestCase):
             ok = True
 
             def json(self):
-                return {"reply": "ok"}
+                return {"reply": "ok", "team_actions": [{"kind": "message", "to": "Geno", "text": "fyi"}]}
 
         def fake_post(url, headers=None, json=None, timeout=None):
             captured.update(json)
@@ -102,6 +102,7 @@ class DiscussionChannelTest(unittest.TestCase):
         self.assertEqual(out["reply"], "ok")
         self.assertEqual(captured["session_id"], "discussion_u1_space-1_root-1")
         self.assertEqual(captured["channel"], "discussion")
+        self.assertEqual(out["team_actions"], [{"kind": "message", "to": "Geno", "text": "fyi"}])
 
     def test_conversational_approval_short_circuits(self):
         svc = make_service()

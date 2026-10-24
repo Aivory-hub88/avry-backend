@@ -217,6 +217,8 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
         "agent_type": body.agent_type,
         "agent_name": AGENT_TYPES[body.agent_type],
         "pending_approval": result.get("pending_approval"),
+        # ADR-021: the room executes these after posting the reply.
+        "team_actions": result.get("team_actions") or [],
     }
 
 
