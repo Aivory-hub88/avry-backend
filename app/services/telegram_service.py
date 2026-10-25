@@ -984,7 +984,7 @@ class TelegramService:
         care (e.g. the console) can just read ["reply"].
         """
         if not settings.telegram_agent_gateway_url:
-            return {"reply": FALLBACK_REPLY, "pending_approval": None}
+            return {"reply": FALLBACK_REPLY, "pending_approval": None, "team_actions": []}
         headers = {}
         gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
         if gateway_token:
@@ -1022,9 +1022,13 @@ class TelegramService:
             )
             if resp.ok:
                 data = resp.json()
+                team_actions = data.get("team_actions")
                 return {
                     "reply": (data.get("reply") or FALLBACK_REPLY)[:4096],
                     "pending_approval": data.get("pending_approval"),
+                    # ADR-021: speech acts a room agent made with its team tools.
+                    # Relayed as-is; the dashboard room validates and executes them.
+                    "team_actions": team_actions if isinstance(team_actions, list) else [],
                 }
             logger.error(f"Agent gateway returned {resp.status_code}: {resp.text[:200]}")
         except (requests.RequestException, ValueError) as e:
@@ -1034,6 +1038,7 @@ class TelegramService:
         return {
             "reply": "⚠️ The agent is temporarily unavailable. Please try again in a moment.",
             "pending_approval": None,
+            "team_actions": [],
         }
 
     def route_console_message(
