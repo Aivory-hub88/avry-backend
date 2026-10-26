@@ -85,6 +85,15 @@ class Settings(BaseSettings):
     account_cleanup_enabled: bool = False
     account_cleanup_interval_seconds: int = 1800
 
+    # Team Space reminders that fire with the room closed (ADR-021 §4.1, see
+    # app/services/room_reminder_sweeper.py). Off by default; the dashboard's
+    # room poll fires reminders either way. DASHBOARD_INTERNAL_URL is the
+    # dashboard as this container reaches it, basePath included
+    # (e.g. http://avry-user-dashboard:9001/dashboard).
+    room_reminder_sweeper_enabled: bool = False
+    room_reminder_sweep_interval_seconds: int = 60
+    dashboard_internal_url: Optional[str] = None
+
     # CORS configuration
     cors_origins: list[str] = ["*"]
 

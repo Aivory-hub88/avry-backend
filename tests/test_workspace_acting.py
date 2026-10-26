@@ -71,13 +71,14 @@ class CanActAsFailClosedTest(unittest.TestCase):
 
 
 class DiscussionTurnRouteTest(unittest.TestCase):
-    def call(self, acting_as, can_act=True, leader_exists=True, member_id="member"):
+    def call(self, acting_as, can_act=True, leader_exists=True, member_id="member", turn_origin=None):
         body = tg.DiscussionTurnRequest(
             agent_type="leads_qualifier",
             space_id="s1",
             thread_root="t1",
             text="hi",
             acting_as=acting_as,
+            turn_origin=turn_origin,
         )
         seen = {}
 
@@ -86,13 +87,16 @@ class DiscussionTurnRouteTest(unittest.TestCase):
                 return None
             return {"user_id": uid, "account_type": "business"}
 
-        def route(record, agent_type, space, root, text, allow_approval_text=True):
+        def route(record, agent_type, space, root, text, allow_approval_text=True, turn_origin=None):
             seen["tenant"] = record["user_id"]
             seen["allow_approval_text"] = allow_approval_text
+            seen["turn_origin"] = turn_origin
             return {
                 "reply": "ok",
                 "pending_approval": None,
                 "team_actions": [{"kind": "ask", "to": "Lex", "text": "Qualified?"}],
+                "run_outcome": "failed" if turn_origin else None,
+                "run_failure_reason": "Odoo down" if turn_origin else None,
             }
 
         with (
@@ -107,6 +111,15 @@ class DiscussionTurnRouteTest(unittest.TestCase):
     def test_team_actions_are_relayed_to_the_room(self):
         out, _, _ = self.call("leader")
         self.assertEqual(out["team_actions"], [{"kind": "ask", "to": "Lex", "text": "Qualified?"}])
+
+    def test_turn_origin_goes_down_and_the_run_outcome_comes_back(self):
+        out, seen, _ = self.call("leader", turn_origin="reminder")
+        self.assertEqual(seen["turn_origin"], "reminder")
+        self.assertEqual(out["run_outcome"], "failed")
+        self.assertEqual(out["run_failure_reason"], "Odoo down")
+        out, seen, _ = self.call("leader")
+        self.assertIsNone(seen["turn_origin"])
+        self.assertIsNone(out["run_outcome"])
 
     def test_member_turn_runs_in_leader_tenant(self):
         out, seen, gate = self.call("leader")
