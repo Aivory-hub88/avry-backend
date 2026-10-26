@@ -40,9 +40,12 @@ class LoadJwtSecretTest(unittest.TestCase):
 
     def test_every_module_uses_the_shared_secret(self):
         from app.routes import admin_users, deps, impersonation, logs
-        from app.services import auth_service, impersonation_token_service
+        from app.services import auth_service, impersonation_token_service, room_reminder_sweeper
 
-        for mod in (admin_users, deps, impersonation, logs, auth_service, impersonation_token_service):
+        for mod in (
+            admin_users, deps, impersonation, logs, auth_service, impersonation_token_service,
+            room_reminder_sweeper,
+        ):
             self.assertIs(mod.JWT_SECRET, jwt_secret.JWT_SECRET, mod.__name__)
 
     def test_no_placeholder_fallback_left_in_source(self):

@@ -169,6 +169,10 @@ class DiscussionTurnRequest(BaseModel):
     # is billed to them; the caller (a member) is only the requester. Verified
     # server-side against the space's owner + the caller's write access.
     acting_as: Optional[str] = None
+    # ADR-021 §4.3: `reminder` / `wake` for a turn nobody is waiting on (a
+    # fired reminder, a woken wait). Cerveau then offers run_no_update /
+    # run_report_failure; anything else is a normal conversation turn.
+    turn_origin: Optional[str] = None
 
 
 def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_current_user_payload)):
@@ -211,6 +215,7 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
         text[:8000],
         # Only the tenant owner's own session may answer a pending approval by text.
         allow_approval_text=(owner_id == user["user_id"]),
+        turn_origin=body.turn_origin,
     )
     return {
         "reply": result["reply"],
@@ -219,6 +224,9 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
         "pending_approval": result.get("pending_approval"),
         # ADR-021: the room executes these after posting the reply.
         "team_actions": result.get("team_actions") or [],
+        # ADR-021 §4.3: `quiet` | `failed` | None, unattended turns only.
+        "run_outcome": result.get("run_outcome"),
+        "run_failure_reason": result.get("run_failure_reason"),
     }
 
 

@@ -248,6 +248,28 @@ def _approval_keyboard(pending_approval: Optional[dict]) -> Optional[dict]:
     return None
 
 
+#: ADR-021 §4.3: turn origins Cerveau treats as unattended.
+UNATTENDED_TURN_ORIGINS = ("cron", "reminder", "wake")
+
+
+def unattended_turn_origin(raw: Optional[str]) -> Optional[str]:
+    """`raw` when it names an unattended turn, else None (a conversation turn)."""
+    origin = (raw or "").strip().lower()
+    return origin if origin in UNATTENDED_TURN_ORIGINS else None
+
+
+def run_outcome_fields(data: dict) -> dict:
+    """The run outcome an unattended turn reported, relayed only when well-formed."""
+    outcome = data.get("run_outcome")
+    if outcome not in ("quiet", "failed"):
+        return {"run_outcome": None, "run_failure_reason": None}
+    reason = data.get("run_failure_reason") if outcome == "failed" else None
+    return {
+        "run_outcome": outcome,
+        "run_failure_reason": reason[:500] if isinstance(reason, str) else None,
+    }
+
+
 def load_user_record(db, user_id: str) -> Optional[dict]:
     """Load a user (+ current subscription tier) — Postgres on prod, file store in dev.
 
@@ -1010,6 +1032,8 @@ class TelegramService:
             team_agents = self._team_active_agents(binding, channel)
             if team_agents:
                 message["active_agents"] = team_agents
+            if binding.get("turn_origin"):
+                message["turn_origin"] = binding["turn_origin"]
             resp = requests.post(
                 f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/message",
                 headers=headers,
@@ -1029,6 +1053,7 @@ class TelegramService:
                     # ADR-021: speech acts a room agent made with its team tools.
                     # Relayed as-is; the dashboard room validates and executes them.
                     "team_actions": team_actions if isinstance(team_actions, list) else [],
+                    **run_outcome_fields(data),
                 }
             logger.error(f"Agent gateway returned {resp.status_code}: {resp.text[:200]}")
         except (requests.RequestException, ValueError) as e:
@@ -1095,6 +1120,7 @@ class TelegramService:
         thread_root: str,
         text: str,
         allow_approval_text: bool = True,
+        turn_origin: Optional[str] = None,
     ) -> dict:
         """Talk to a deployable agent from a workspace Discussion room (JWT auth).
 
@@ -1125,6 +1151,10 @@ class TelegramService:
             "space_id": space,
             "room_session_id": f"discussion_{user['user_id']}_{space}_{root}",
         }
+        origin = unattended_turn_origin(turn_origin)
+        if origin:
+            # ADR-021 §4.3: a fired reminder / woken wait, nobody waiting on it.
+            pseudo_binding["turn_origin"] = origin
         # A member acting as the Space leader (ADR-020) must never resolve the
         # leader's pending approvals with a bare "Ya": only the leader's own
         # session decides those, so the text protocol is off for that caller.

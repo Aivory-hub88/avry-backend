@@ -52,8 +52,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[!] Odoo key-expiry poller failed to start: {e}")
 
+    # Team Space reminders with the room closed (ADR-021 §4.1). Idle unless
+    # ROOM_REMINDER_SWEEPER_ENABLED and DASHBOARD_INTERNAL_URL are set.
+    reminder_task = None
+    if _PG:
+        try:
+            from app.services import room_reminder_sweeper
+            reminder_task = asyncio.create_task(room_reminder_sweeper.run_poller())
+            print("[OK] Room reminder sweeper started")
+        except Exception as e:
+            print(f"[!] Room reminder sweeper failed to start: {e}")
+
     yield
     print("[SHUTDOWN] avry-backend stopping...")
+    if reminder_task:
+        reminder_task.cancel()
     if cleanup_task:
         cleanup_task.cancel()
     if odoo_key_task:
