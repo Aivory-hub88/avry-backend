@@ -643,6 +643,39 @@ async def extend_partner_access(
     return {"success": True, "partnerExpiresAt": row["expires_at"].isoformat()}
 
 
+# ── PATCH /api/v1/admin/users/{id}/seat-limit ────────────────────────────────
+
+
+@router.patch("/users/{user_id}/seat-limit")
+async def set_seat_limit(
+    user_id: str,
+    body: dict,
+    authorization: Optional[str] = Header(None),
+):
+    """
+    Set an account's contracted seat count (Enterprise deals), or clear it
+    with `seatLimit: null` to fall back to the plan default. Superadmin only:
+    seats are part of what the customer pays for.
+    """
+    payload = await require_admin(authorization)
+    if payload.get("account_type") != "superadmin":
+        raise HTTPException(status_code=403, detail="Only superadmins can change seat limits")
+
+    seats = (body or {}).get("seatLimit")
+    if seats is not None and (isinstance(seats, bool) or not isinstance(seats, int) or seats < 1 or seats > 10000):
+        raise HTTPException(status_code=400, detail="seatLimit must be a whole number from 1 to 10000, or null")
+
+    pool = await pg.get_pool()
+    row = await pool.fetchrow(
+        "UPDATE user_tiers SET seat_limit = $1, updated_at = now() WHERE user_id = $2 RETURNING tier",
+        seats, user_id,
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="This account has no plan to attach seats to")
+
+    return {"success": True, "seatLimit": tiers.seat_limit(row["tier"], seats)}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 

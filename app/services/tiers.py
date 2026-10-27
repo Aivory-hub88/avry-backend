@@ -68,6 +68,20 @@ TIER_ALLOWANCES: Dict[str, int] = {
 }
 
 
+#: People an account may have across the workspaces it owns, the owner
+#: included. Mirrors `TIER_SEAT_LIMIT` in the user dashboard's lib/tiers.ts
+#: (which enforces it on workspace invites) and the marketing plan cards
+#: (1 seat / 5 seats / Custom seats (15+)). Enterprise is per contract:
+#: `user_tiers.seat_limit` overrides the default.
+SEAT_LIMITS: Dict[str, int] = {
+    "operational": 1,
+    "business": 5,
+    "enterprise": 15,
+}
+
+#: Seats for an account without a live subscription: itself.
+NO_PLAN_SEATS = 1
+
 #: The value used when an account holds no live subscription: it never paid,
 #: or its entitlement has lapsed. Ranks BELOW every paid tier.
 FREE_TIER = "free"
@@ -131,6 +145,17 @@ def account_tier(tier: Optional[str]) -> str:
     """
     position = rank(tier)
     return FREE_TIER if position < 0 else CANONICAL_TIERS[position]
+
+
+def seat_limit(tier: Optional[str], override: Optional[int] = None) -> int:
+    """
+    Seats for an account on `tier`. A positive `override` (an Enterprise
+    contract) wins; no live plan, or a one-time product, is one seat.
+    """
+    if isinstance(override, int) and not isinstance(override, bool) and override > 0:
+        return override
+    position = rank(tier)
+    return NO_PLAN_SEATS if position < 0 else SEAT_LIMITS[CANONICAL_TIERS[position]]
 
 
 def meets(tier: Optional[str], minimum: str) -> bool:

@@ -313,6 +313,11 @@ BEGIN
     END IF;
 END $$;
 
+-- Enterprise seat contracts: overrides tiers.SEAT_LIMITS for this account.
+-- NULL = the plan default. Read by the user dashboard's workspace invites.
+ALTER TABLE user_tiers ADD COLUMN IF NOT EXISTS seat_limit INTEGER
+    CHECK (seat_limit IS NULL OR seat_limit > 0);
+
 -- Self-service + admin-issued password reset links
 -- (app/services/password_reset_service.py). Not created anywhere else — same
 -- situation as user_tiers above, declared here so a fresh install has it.

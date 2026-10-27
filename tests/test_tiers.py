@@ -101,6 +101,29 @@ class Display(unittest.TestCase):
         self.assertEqual(tiers.display_name("pro"), "Business")
         self.assertEqual(tiers.display_name(None), "Free")
 
+class Seats(unittest.TestCase):
+    def test_published_plans(self):
+        self.assertEqual(tiers.seat_limit("operational"), 1)
+        self.assertEqual(tiers.seat_limit("business"), 5)
+        self.assertEqual(tiers.seat_limit("enterprise"), 15)
+
+    def test_legacy_ids(self):
+        self.assertEqual(tiers.seat_limit("pro"), 5)
+        self.assertEqual(tiers.seat_limit("intelligence"), 15)
+
+    def test_no_live_plan_is_one_seat(self):
+        for t in (None, "", "free", "blueprint", "nonsense"):
+            self.assertEqual(tiers.seat_limit(t), 1, t)
+
+    def test_contract_override(self):
+        self.assertEqual(tiers.seat_limit("enterprise", 40), 40)
+        self.assertEqual(tiers.seat_limit("enterprise", 0), 15)
+        self.assertEqual(tiers.seat_limit("enterprise", True), 15)
+
+    def test_every_plan_has_seats(self):
+        self.assertEqual(set(tiers.SEAT_LIMITS), set(tiers.CANONICAL_TIERS))
+
+
 
 if __name__ == "__main__":
     unittest.main()
