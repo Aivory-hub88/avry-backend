@@ -84,15 +84,15 @@ class CreditAllowanceUnaffected(unittest.TestCase):
         )
 
     def test_allowances_per_tier(self):
-        self.assertEqual(self._allowance("operational"), 80)
-        self.assertEqual(self._allowance("foundation"), 80)
-        self.assertEqual(self._allowance("business"), 220)
-        self.assertEqual(self._allowance("pro"), 220)
-        self.assertEqual(self._allowance("enterprise"), 3000)
+        self.assertEqual(self._allowance("operational"), 1500)
+        self.assertEqual(self._allowance("foundation"), 1500)
+        self.assertEqual(self._allowance("business"), 6500)
+        self.assertEqual(self._allowance("pro"), 6500)
+        self.assertEqual(self._allowance("enterprise"), 90000)
 
     def test_accounts_with_no_plan_keep_the_base_allowance(self):
         for value in (None, "", "free"):
-            self.assertEqual(self._allowance(value), 80)
+            self.assertEqual(self._allowance(value), 1500)
 
 
 class Display(unittest.TestCase):

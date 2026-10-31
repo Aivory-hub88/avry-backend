@@ -728,5 +728,5 @@ def _get_credits_max(account_type: str) -> int:
         "enterprise": 2000,
         "superadmin": 2000,
         "admin": 500,
-        "partner": 3000,  # Enterprise allowance, see PARTNER_TIER
+        "partner": tiers.TIER_ALLOWANCES["enterprise"],  # see PARTNER_TIER
     }.get(account_type, 10)

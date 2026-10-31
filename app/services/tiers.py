@@ -61,11 +61,40 @@ MONTHLY_PRICE_USD: Dict[str, int] = {
 }
 
 #: Monthly Intelligence Credit allowance per tier.
+#:
+#: A credit is a unit of LLM spend, not a message: the bridge charges each
+#: agent turn by what OpenRouter actually billed for it (see
+#: `CREDIT_COST_USD`). The allowances are sized so a tier that spends its whole
+#: allowance at peak DeepSeek rates still keeps about a 70% margin
+#: (Operational ~66%, Business ~70%). Enterprise is per contract; this is only
+#: the default when no contract figure is stored.
 TIER_ALLOWANCES: Dict[str, int] = {
-    "operational": 80,
-    "business": 220,
-    "enterprise": 3000,
+    "operational": 1500,
+    "business": 6500,
+    "enterprise": 90000,
 }
+
+#: LLM spend one credit covers, in USD (OpenRouter's billed cost plus its
+#: 5.5% top-up fee). Every price that sells credits must keep at least a 65%
+#: margin over this: Business is $99 / 6,500 = $0.0152 a credit, the cheapest
+#: top-up pack $1,000 / 76,000 = $0.0132. Raising it gives customers more
+#: tokens per credit and lowers every one of those margins.
+CREDIT_COST_USD = 0.004365
+
+#: OpenRouter bills a 5.5% fee on the balance it spends from.
+OPENROUTER_FEE = 1.055
+
+#: Tokens one credit buys on DeepSeek V4.1 Flash, for display only (the
+#: ledger meters dollars). Blended 85% input (half cache hits) / 15% output.
+TOKENS_PER_CREDIT_PEAK = 13000
+TOKENS_PER_CREDIT_OFFPEAK = 26000
+
+#: One credit used to be one agent message. Balances still in those units are
+#: converted on first touch: the unspent part of the monthly allowance keeps
+#: its proportion of the new allowance, and purchased credits are multiplied
+#: by this factor (old packs sold at $0.055-$0.10 a credit, new ones at
+#: $0.013-$0.015, so 7x keeps what customers paid for, rounded in their favour).
+LEGACY_CREDIT_FACTOR = 7
 
 
 #: People an account may have across the workspaces it owns, the owner
