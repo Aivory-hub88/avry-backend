@@ -22,12 +22,16 @@ Dashboard-facing (JWT auth):
     POST   /api/v1/tenant-mcp-servers            -> register + synchronously verify
     GET    /api/v1/tenant-mcp-servers?agent_type=... -> list (never returns the auth header value)
     POST   /api/v1/tenant-mcp-servers/{id}/reverify  -> re-run verification
+    PATCH  /api/v1/tenant-mcp-servers/{id}/auth      -> replace the auth header, then verify
     PATCH  /api/v1/tenant-mcp-servers/{id}/tools     -> set per-tool disabled_tools (§B8)
     DELETE /api/v1/tenant-mcp-servers/{id}        -> disable
 
 Internal (Cerveau-facing, X-Internal-Token):
     GET /api/v1/tenant-mcp-servers/internal/{user_id}/{agent_type}
-        -> decrypted, status='verified' rows only
+        -> decrypted, status='verified' rows, plus name + reason code of
+           verification_failed rows (no url, no credentials)
+    POST /api/v1/tenant-mcp-servers/internal/{user_id}/{agent_type}/auth-failure
+        -> Cerveau got 401/403 from a verified server; flip it to verification_failed
 
 Registration quota is per (user_id, agent_type) and scales with the plan:
 Operational 1, Business 3, Enterprise 10 (`_MAX_SERVERS_BY_TIER`). A
@@ -48,6 +52,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlsplit
@@ -412,23 +417,23 @@ class RegisterServerRequest(BaseModel):
 
     @model_validator(mode="after")
     def _normalize_auth_header_value(self) -> "RegisterServerRequest":
-        # Authorization is a "<scheme> <credential>" pair (RFC 7235), and
-        # every setup guide we show (Aivory Mail's own settings page included)
-        # tells the operator to enter "Bearer <token>" as the value — but a
-        # bare token is the far easier thing to accidentally paste, and the
-        # dashboard sends whatever lands in this field completely verbatim.
-        # A token-shaped value with no space is *never* a valid Authorization
-        # value on its own, so silently 401ing every such registration (a
-        # perfectly valid token, rejected only because "Bearer " is missing)
-        # is a paste-error tax with no compensating safety benefit.
-        if (
-            self.auth_header_value
-            and self.auth_header_name
-            and self.auth_header_name.strip().lower() == "authorization"
-            and " " not in self.auth_header_value.strip()
-        ):
-            self.auth_header_value = f"Bearer {self.auth_header_value.strip()}"
+        self.auth_header_value = _normalize_auth_header_value(self.auth_header_name, self.auth_header_value)
         return self
+
+
+def _normalize_auth_header_value(name: Optional[str], value: Optional[str]) -> Optional[str]:
+    # Authorization is a "<scheme> <credential>" pair (RFC 7235), and
+    # every setup guide we show (Aivory Mail's own settings page included)
+    # tells the operator to enter "Bearer <token>" as the value — but a
+    # bare token is the far easier thing to accidentally paste, and the
+    # dashboard sends whatever lands in this field completely verbatim.
+    # A token-shaped value with no space is *never* a valid Authorization
+    # value on its own, so silently 401ing every such registration (a
+    # perfectly valid token, rejected only because "Bearer " is missing)
+    # is a paste-error tax with no compensating safety benefit.
+    if value and name and name.strip().lower() == "authorization" and " " not in value.strip():
+        return f"Bearer {value.strip()}"
+    return value
 
 
 _LIST_COLUMNS = (
@@ -994,6 +999,63 @@ def reverify_server(server_id: str, user: dict = Depends(get_current_user_payloa
     return _verify_and_persist(server_id, user["user_id"], agent_type, url, auth_header_name, auth_header_value)
 
 
+class UpdateAuthRequest(BaseModel):
+    # Omitted = keep the row's current header name (the common case: a
+    # rotated token for the same Authorization header).
+    auth_header_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    auth_header_value: str = Field(min_length=1, max_length=4000)
+
+
+@router.patch("/{server_id}/auth")
+def update_server_auth(server_id: str, body: UpdateAuthRequest, user: dict = Depends(get_current_user_payload)):
+    """Replace the stored auth header (an expired or rotated token) and
+    re-verify with it, so fixing a credential no longer means removing the
+    server and registering it again, which also lost its per-tool settings."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT agent_type, url, auth_header_name FROM product.tenant_custom_mcp_servers"
+                " WHERE id = %s AND user_id = %s AND status != 'disabled'",
+                (server_id, user["user_id"]),
+            )
+            row = cur.fetchone()
+    except Exception as e:
+        logger.error(f"tenant MCP server auth-update lookup failed: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Server not found")
+    agent_type, url, current_header_name = row
+    _require_paid_tier(user["user_id"])
+    _require_cerveau_engine(user["user_id"], agent_type)
+
+    header_name = (body.auth_header_name or current_header_name or "Authorization").strip()
+    header_value = _normalize_auth_header_value(header_name, body.auth_header_value.strip())
+    encrypted = mcp_server_encryption.encrypt_auth_header_value(header_value)
+
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product.tenant_custom_mcp_servers"
+                " SET auth_header_name = %s, auth_header_value_encrypted = %s, updated_at = now()"
+                " WHERE id = %s AND user_id = %s AND status != 'disabled'",
+                (header_name, encrypted, server_id, user["user_id"]),
+            )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"tenant MCP server auth-update failed for {server_id}: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+
+    return _verify_and_persist(server_id, user["user_id"], agent_type, url, header_name, header_value)
+
+
 class UpdateDisabledToolsRequest(BaseModel):
     disabled_tools: list[str] = Field(default_factory=list, max_length=500)
 
@@ -1104,6 +1166,12 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
                 (user_id, agent_type),
             )
             rows = cur.fetchall()
+            cur.execute(
+                "SELECT name, last_verify_error FROM product.tenant_custom_mcp_servers"
+                " WHERE user_id = %s AND agent_type = %s AND status = 'verification_failed'",
+                (user_id, agent_type),
+            )
+            failed_rows = cur.fetchall()
     except Exception as e:
         logger.error(f"internal tenant MCP server lookup failed for {user_id}/{agent_type}: {e}")
         raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
@@ -1130,4 +1198,94 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
                 "disabled_tools": list(disabled_tools) if disabled_tools else [],
             }
         )
-    return {"servers": servers}
+    # Registered but unusable: Cerveau tells the agent these are down (and
+    # why) instead of the tools silently vanishing from its turn.
+    unavailable = [{"name": name, "reason": _unavailable_reason_code(error)} for name, error in failed_rows]
+    return {"servers": servers, "unavailable": unavailable}
+
+
+def _unavailable_reason_code(last_verify_error: Optional[str]) -> str:
+    """Coarse code for Cerveau's prompt note. The free-text error can hold
+    whatever a tenant's server sent back, so it never leaves this service."""
+    error = last_verify_error or ""
+    if "HTTP 401" in error or "HTTP 403" in error or error == _ODOO_KEY_REJECTED_REASON:
+        return "auth_rejected"
+    return "verification_failed"
+
+
+class AuthFailureReport(BaseModel):
+    name: str
+    status: int
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, v: str) -> str:
+        if not _NAME_RE.match(v):
+            raise ValueError("name must match ^[a-zA-Z0-9_-]{1,40}$")
+        return v
+
+    @field_validator("status")
+    @classmethod
+    def _validate_status(cls, v: int) -> int:
+        if v not in (401, 403):
+            raise ValueError("status must be 401 or 403")
+        return v
+
+
+# Cerveau deduplicates per (tenant, server) for 10 minutes, but every Cerveau
+# process (and every restart) has its own memory, so dedupe here as well. Per
+# process and best effort: the UPDATE below is idempotent anyway.
+_AUTH_FAILURE_DEDUPE_SECONDS = 600
+_auth_failure_seen: dict[tuple[str, str, str], float] = {}
+
+# Cerveau caches a tenant's server list for 5 minutes, so right after the
+# user reconnects it can still try the old token once. A row verified more
+# recently than this is not flipped by a Cerveau report.
+_AUTH_FAILURE_GRACE = "6 minutes"
+
+
+def _auth_failure_reason(status: int) -> str:
+    return (
+        f"Aivory's agent was refused with HTTP {status}: the credentials have expired or been "
+        "revoked. Update the token or reconnect this server."
+    )
+
+
+@router.post("/internal/{user_id}/{agent_type}/auth-failure", dependencies=[Depends(require_internal_token)])
+def internal_report_auth_failure(user_id: str, agent_type: str, body: AuthFailureReport):
+    """Cerveau got 401/403 connecting to a verified tenant server: flip the
+    row to verification_failed so the dashboard stops showing "Verified"
+    until someone happens to click Reverify."""
+    _check_agent_type(agent_type)
+    key = (user_id, agent_type, body.name)
+    now = time.monotonic()
+    for k, seen_at in list(_auth_failure_seen.items()):
+        if now - seen_at >= _AUTH_FAILURE_DEDUPE_SECONDS:
+            del _auth_failure_seen[k]
+    if key in _auth_failure_seen:
+        return {"flipped": False, "deduped": True}
+    _auth_failure_seen[key] = now
+
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product.tenant_custom_mcp_servers"
+                " SET status = 'verification_failed', last_verify_error = %s, updated_at = now()"
+                " WHERE user_id = %s AND agent_type = %s AND name = %s AND status = 'verified'"
+                f" AND (last_verified_at IS NULL OR last_verified_at < now() - interval '{_AUTH_FAILURE_GRACE}')"
+                " RETURNING id",
+                (_auth_failure_reason(body.status), user_id, agent_type, body.name),
+            )
+            flipped = cur.fetchone() is not None
+        conn.commit()
+    except Exception as e:
+        _auth_failure_seen.pop(key, None)
+        logger.error(f"tenant MCP auth-failure report failed for {user_id}/{agent_type}/{body.name}: {e}")
+        raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
+    finally:
+        conn.close()
+    if flipped:
+        logger.warning(f"tenant MCP server {user_id}/{agent_type}/{body.name} flipped to verification_failed (HTTP {body.status} from Cerveau)")
+    return {"flipped": flipped, "deduped": False}
