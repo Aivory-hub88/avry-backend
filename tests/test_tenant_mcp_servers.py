@@ -252,6 +252,143 @@ class TierQuota(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 403)
 
 
+class _FakeCursor:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.conn.executed.append((sql, params))
+
+    def fetchone(self):
+        return self.conn.fetchone_results.pop(0) if self.conn.fetchone_results else None
+
+    def fetchall(self):
+        return self.conn.fetchall_results.pop(0) if self.conn.fetchall_results else []
+
+
+class _FakeConn:
+    def __init__(self, fetchone_results=None, fetchall_results=None):
+        self.executed = []
+        self.fetchone_results = list(fetchone_results or [])
+        self.fetchall_results = list(fetchall_results or [])
+        self.commits = 0
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+
+class InternalAuthFailureReport(unittest.TestCase):
+    """Cerveau reports a 401/403 from a verified tenant server: the row flips
+    to verification_failed once, and repeats inside the window skip the DB."""
+
+    def setUp(self):
+        m._auth_failure_seen.clear()
+
+    def _report(self, conn, name="aivory-mail", status=401):
+        with patch.object(m, "_connect", return_value=conn), patch.object(m, "_ensure_schema"):
+            return m.internal_report_auth_failure("u1", "leads_qualifier", m.AuthFailureReport(name=name, status=status))
+
+    def test_first_report_flips_the_verified_row(self):
+        conn = _FakeConn(fetchone_results=[("row-1",)])
+        self.assertEqual(self._report(conn), {"flipped": True, "deduped": False})
+        sql, params = conn.executed[0]
+        self.assertIn("SET status = 'verification_failed'", sql)
+        self.assertIn("status = 'verified'", sql)
+        self.assertIn("last_verified_at < now() - interval", sql)
+        self.assertEqual(params[1:], ("u1", "leads_qualifier", "aivory-mail"))
+        self.assertIn("HTTP 401", params[0])
+        self.assertEqual(conn.commits, 1)
+
+    def test_repeat_report_is_deduped_without_touching_the_db(self):
+        self._report(_FakeConn(fetchone_results=[("row-1",)]))
+        conn = _FakeConn()
+        self.assertEqual(self._report(conn), {"flipped": False, "deduped": True})
+        self.assertEqual(conn.executed, [])
+
+    def test_other_server_is_not_deduped(self):
+        self._report(_FakeConn(fetchone_results=[("row-1",)]))
+        conn = _FakeConn(fetchone_results=[None])
+        self.assertEqual(self._report(conn, name="orders", status=403), {"flipped": False, "deduped": False})
+        self.assertEqual(len(conn.executed), 1)
+
+    def test_db_failure_does_not_burn_the_dedupe_slot(self):
+        from fastapi import HTTPException
+
+        class _Broken(_FakeConn):
+            def cursor(self):
+                raise RuntimeError("db down")
+
+        with self.assertRaises(HTTPException):
+            self._report(_Broken())
+        conn = _FakeConn(fetchone_results=[("row-1",)])
+        self.assertEqual(self._report(conn)["flipped"], True)
+
+    def test_only_auth_statuses_are_accepted(self):
+        with self.assertRaises(Exception):
+            m.AuthFailureReport(name="aivory-mail", status=500)
+        with self.assertRaises(Exception):
+            m.AuthFailureReport(name="bad name", status=401)
+
+
+class InternalListUnavailable(unittest.TestCase):
+    def test_failed_rows_come_back_as_reason_codes_only(self):
+        conn = _FakeConn(fetchall_results=[
+            [],
+            [
+                ("aivory-mail", m._auth_failure_reason(401)),
+                ("orders", "server returned HTTP 500 <html>secret page</html>"),
+                ("odoo", m._ODOO_KEY_REJECTED_REASON),
+            ],
+        ])
+        with patch.object(m, "_connect", return_value=conn), patch.object(m, "_ensure_schema"):
+            body = m.internal_list_verified_servers("u1", "leads_qualifier")
+        self.assertEqual(body["servers"], [])
+        self.assertEqual(body["unavailable"], [
+            {"name": "aivory-mail", "reason": "auth_rejected"},
+            {"name": "orders", "reason": "verification_failed"},
+            {"name": "odoo", "reason": "auth_rejected"},
+        ])
+
+
+class UpdateServerAuth(unittest.TestCase):
+    def test_new_token_is_encrypted_normalized_and_verified(self):
+        lookup = _FakeConn(fetchone_results=[("leads_qualifier", "https://mail.aivory.uk/mcp", "Authorization")])
+        update = _FakeConn()
+        with patch.object(m, "_connect", side_effect=[lookup, update]), \
+             patch.object(m, "_ensure_schema"), \
+             patch.object(m, "_require_paid_tier"), \
+             patch.object(m, "_require_cerveau_engine"), \
+             patch.object(m.mcp_server_encryption, "encrypt_auth_header_value", return_value=b"enc") as enc, \
+             patch.object(m, "_verify_and_persist", return_value={"status": "verified"}) as verify:
+            result = m.update_server_auth("row-1", m.UpdateAuthRequest(auth_header_value="newtoken"), {"user_id": "u1"})
+        self.assertEqual(result, {"status": "verified"})
+        enc.assert_called_once_with("Bearer newtoken")
+        sql, params = update.executed[0]
+        self.assertIn("auth_header_value_encrypted = %s", sql)
+        self.assertEqual(params, ("Authorization", b"enc", "row-1", "u1"))
+        verify.assert_called_once_with("row-1", "u1", "leads_qualifier", "https://mail.aivory.uk/mcp", "Authorization", "Bearer newtoken")
+
+    def test_unknown_server_is_404(self):
+        from fastapi import HTTPException
+
+        with patch.object(m, "_connect", return_value=_FakeConn()), patch.object(m, "_ensure_schema"):
+            with self.assertRaises(HTTPException) as ctx:
+                m.update_server_auth("nope", m.UpdateAuthRequest(auth_header_value="t"), {"user_id": "u1"})
+        self.assertEqual(ctx.exception.status_code, 404)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
