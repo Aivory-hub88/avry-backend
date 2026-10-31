@@ -14,10 +14,10 @@ insert happens in the same transaction as the effect, so a crash rolls back both
 
 Product -> effect, following the pricing page and credit_service.TIER_ALLOWANCES:
 
-    operational   -> tier 'operational' (80 credits/mo), 31 days
-    business      -> tier 'business'    (220 credits/mo), 31 days
+    operational   -> tier 'operational' (1,500 credits/mo), 31 days
+    business      -> tier 'business'    (6,500 credits/mo), 31 days
     operational_annual / business_annual -> the same tier for 365 days
-    enterprise    -> tier 'enterprise'  (3000 credits/mo)
+    enterprise    -> tier 'enterprise'  (90,000 credits/mo)
     ai_snapshot   -> feature 'snapshot'
     ai_blueprint  -> feature 'blueprint'
     ai_fullstack  -> features 'snapshot' + 'blueprint', plus 1 month of tier 'business'

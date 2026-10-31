@@ -2,7 +2,8 @@
 Credit API — LLM-usage metering for deployable agents.
 
 Internal (bridge-facing, X-Internal-Token == TELEGRAM_GATEWAY_TOKEN):
-    POST /api/v1/credits/internal/consume       -> deduct credits (402 when short)
+    POST /api/v1/credits/internal/consume       -> deduct credits (402 when short,
+                                                   unless allow_partial)
     GET  /api/v1/credits/internal/status/{uid}  -> balance snapshot
 
 Dashboard-facing (JWT auth):
@@ -28,9 +29,12 @@ VALID_REASONS = {"agent_message", "diagnostic", "blueprint", "roadmap", "console
 
 class ConsumeRequest(BaseModel):
     user_id: str = Field(min_length=1, max_length=128)
-    amount: int = Field(default=1, ge=1, le=100)
+    # Credits are metered by LLM spend, so one heavy turn can cost thousands.
+    amount: int = Field(default=1, ge=1, le=20000)
     reason: str = Field(default="agent_message", max_length=64)
     meta: Optional[dict] = None
+    # Settling a turn that already ran: charge what is left instead of 402.
+    allow_partial: bool = False
 
 
 @router.post("/internal/consume", dependencies=[Depends(require_internal_token)])
@@ -38,7 +42,9 @@ def consume_credits(body: ConsumeRequest):
     if body.reason not in VALID_REASONS:
         raise HTTPException(status_code=400, detail=f"Unknown reason '{body.reason}'")
     try:
-        result = credit_service.consume(body.user_id, body.amount, body.reason, body.meta)
+        result = credit_service.consume(
+            body.user_id, body.amount, body.reason, body.meta, allow_partial=body.allow_partial
+        )
     except InsufficientCredits as e:
         raise HTTPException(
             status_code=402,
