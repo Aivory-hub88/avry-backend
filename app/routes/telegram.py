@@ -132,19 +132,10 @@ async def _run_with_keepalive(fn, *, first_wait: float = KEEPALIVE_FIRST_WAIT, i
 
 def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_payload)):
     """Talk to a deployable agent from the dashboard AI Console (JWT auth)."""
-    if body.agent_type not in AGENT_TYPES:
-        raise HTTPException(status_code=400, detail=f"Unknown agent_type '{body.agent_type}'")
-    text = (body.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="text is required")
-
-    record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
-    tier_err = agent_tier_error(record, body.agent_type)
-    if tier_err:
-        raise HTTPException(status_code=403, detail=tier_err)
+    record, text = _validated_agent_chat(body, user)
 
     result = telegram_service.route_console_message(
-        record, body.agent_type, text[:8000], body.conversation_id, team_id=body.team_id
+        record, body.agent_type, text, body.conversation_id, team_id=body.team_id
     )
     return {
         "reply": result["reply"],
@@ -152,6 +143,49 @@ def agent_chat(body: AgentChatRequest, user: dict = Depends(get_current_user_pay
         "agent_name": AGENT_TYPES[body.agent_type],
         "pending_approval": result.get("pending_approval"),
     }
+
+
+def _validated_agent_chat(body: AgentChatRequest, user: dict):
+    """Checks shared by the blocking and streaming agent-chat routes."""
+    if body.agent_type not in AGENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type '{body.agent_type}'")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
+    tier_err = agent_tier_error(record, body.agent_type)
+    if tier_err:
+        raise HTTPException(status_code=403, detail=tier_err)
+    return record, text[:8000]
+
+
+@router.post("/agent-chat/stream")
+def agent_chat_stream_route(body: AgentChatRequest, user: dict = Depends(get_current_user_payload)):
+    """Same turn as /agent-chat, delivered as Server-Sent Events.
+
+    Validation errors keep their real HTTP status (nothing is streamed yet).
+    Frames: `chunk` (text delta), then one `done` (with pending_approval) or
+    `error`; `ping` frames keep the connection alive through the proxy.
+    """
+    record, text = _validated_agent_chat(body, user)
+    meta = {"agent_type": body.agent_type, "agent_name": AGENT_TYPES[body.agent_type]}
+
+    def events():
+        yield f"data: {json.dumps({'type': 'start', **meta})}\n\n"
+        try:
+            for frame in telegram_service.route_console_message_stream(
+                record, body.agent_type, text, body.conversation_id, team_id=body.team_id
+            ):
+                yield f"data: {json.dumps(frame)}\n\n"
+        except Exception:
+            logger.exception("agent stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Agent request failed'})}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/agent-chat")

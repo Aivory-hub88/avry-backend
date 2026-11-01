@@ -18,6 +18,7 @@ Storage follows the MVP file-based convention (DatabaseService JSON collections)
     telegram_bindings/{bot_id}_{chat_id}.json
 """
 
+import json
 import logging
 import os
 import re
@@ -216,6 +217,7 @@ _DENY_WORDS = frozenset({
 # Bilingual hint — the agent already asks in the user's language; this line
 # just teaches the protocol shape once per pending turn.
 _APPROVAL_HINT = "\n\nBalas Ya / Reply Yes untuk lanjut, atau Batal / No untuk membatalkan."
+_AGENT_UNAVAILABLE_REPLY = "⚠️ The agent is temporarily unavailable. Please try again in a moment."
 
 
 def parse_approval_text(text: str) -> Optional[str]:
@@ -1061,7 +1063,7 @@ class TelegramService:
         finally:
             agent_run_tracker.clear_running(binding["user_id"], binding["agent_type"])
         return {
-            "reply": "⚠️ The agent is temporarily unavailable. Please try again in a moment.",
+            "reply": _AGENT_UNAVAILABLE_REPLY,
             "pending_approval": None,
             "team_actions": [],
         }
@@ -1094,6 +1096,18 @@ class TelegramService:
         shows the reply text (which carries the "Balas Ya..." hint) and sends
         the user's next message back here.
         """
+        pseudo_binding = self._console_binding(user, agent_type, conversation_id, team_id)
+        handled = self._try_conversational_approval(pseudo_binding, text or "")
+        if handled is not None:
+            return handled
+        return self._remember_pending_result(
+            pseudo_binding, self._route_to_agent(pseudo_binding, text, channel="console")
+        )
+
+    @staticmethod
+    def _console_binding(
+        user: dict, agent_type: str, conversation_id: Optional[str], team_id: Optional[str]
+    ) -> dict:
         pseudo_binding = {
             "user_id": user["user_id"],
             "account_type": user.get("account_type", "free"),
@@ -1105,12 +1119,130 @@ class TelegramService:
         if team_id:
             # Scoped to the caller's own teams at resolution time (ADR-020).
             pseudo_binding["team_id"] = team_id
+        return pseudo_binding
+
+    def route_console_message_stream(
+        self,
+        user: dict,
+        agent_type: str,
+        text: str,
+        conversation_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ):
+        """Streaming twin of route_console_message: yields SSE-ready frame dicts.
+
+        Frames: {"type":"chunk","content":str} (a text delta), then exactly one
+        {"type":"done","pending_approval":dict|None} or {"type":"error","message":str}.
+        A bare {"type":"ping"} is yielded for upstream keep-alives so the browser
+        connection never goes quiet long enough for the proxy to drop it.
+
+        Anything the bridge answers as plain JSON (credit refusal, legacy engine)
+        and the conversational Ya/Batal shortcut are turned into one chunk + done,
+        so the caller handles a single shape.
+        """
+        pseudo_binding = self._console_binding(user, agent_type, conversation_id, team_id)
+
+        def whole(result: dict):
+            if result.get("reply"):
+                yield {"type": "chunk", "content": result["reply"]}
+            yield {"type": "done", "pending_approval": result.get("pending_approval")}
+
         handled = self._try_conversational_approval(pseudo_binding, text or "")
         if handled is not None:
-            return handled
-        return self._remember_pending_result(
-            pseudo_binding, self._route_to_agent(pseudo_binding, text, channel="console")
-        )
+            yield from whole(handled)
+            return
+        if not settings.telegram_agent_gateway_url:
+            yield from whole({"reply": FALLBACK_REPLY})
+            return
+
+        headers = {}
+        gateway_token = os.getenv("TELEGRAM_GATEWAY_TOKEN")
+        if gateway_token:
+            headers["X-Internal-Token"] = gateway_token
+        message = {
+            "user_id": pseudo_binding["user_id"],
+            "agent_type": agent_type,
+            "account_type": pseudo_binding.get("account_type", "free"),
+            "chat_id": pseudo_binding["chat_id"],
+            "session_id": pseudo_binding["room_session_id"],
+            "text": text,
+            "channel": "console",
+            "stream": True,
+        }
+        team_agents = self._team_active_agents(pseudo_binding, "console")
+        if team_agents:
+            message["active_agents"] = team_agents
+
+        agent_run_tracker.mark_running(pseudo_binding["user_id"], agent_type, "console")
+        resp = None
+        try:
+            resp = requests.post(
+                f"{settings.telegram_agent_gateway_url.rstrip('/')}/telegram/message",
+                headers=headers,
+                json=message,
+                stream=True,
+                # (connect, read-between-bytes): the bridge's own Cerveau cap is 185 s.
+                timeout=(10, 195),
+            )
+            if not resp.ok:
+                logger.error(f"Agent gateway returned {resp.status_code}: {resp.text[:200]}")
+                yield from whole({"reply": _AGENT_UNAVAILABLE_REPLY})
+                return
+            if "text/event-stream" not in resp.headers.get("content-type", ""):
+                data = resp.json()
+                yield from whole(
+                    self._remember_pending_result(
+                        pseudo_binding,
+                        {
+                            "reply": (data.get("reply") or FALLBACK_REPLY)[:4096],
+                            "pending_approval": data.get("pending_approval"),
+                        },
+                    )
+                )
+                return
+
+            reply_len = 0
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw:
+                    continue
+                if raw.startswith(":"):
+                    yield {"type": "ping"}
+                    continue
+                if not raw.startswith("data:"):
+                    continue
+                try:
+                    frame = json.loads(raw[5:].strip())
+                except ValueError:
+                    continue
+                kind = frame.get("type")
+                if kind == "chunk":
+                    content = str(frame.get("content") or "")
+                    if content:
+                        reply_len += len(content)
+                        yield {"type": "chunk", "content": content}
+                elif kind == "done":
+                    pending = frame.get("pending_approval")
+                    # Same protocol hint the blocking path appends to the reply text.
+                    remembered = self._remember_pending_result(
+                        pseudo_binding, {"reply": "", "pending_approval": pending}
+                    )
+                    hint = remembered.get("reply") or ""
+                    if hint:
+                        yield {"type": "chunk", "content": hint}
+                    yield {"type": "done", "pending_approval": pending}
+                    return
+                elif kind == "error":
+                    yield {"type": "error", "message": str(frame.get("message") or "Agent request failed")}
+                    return
+            # Upstream closed without a terminal frame: don't leave the client hanging.
+            yield {"type": "error", "message": "Agent stream ended unexpectedly"}
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"Agent gateway stream error: {e}")
+            yield {"type": "error", "message": "Agent is temporarily unavailable"}
+        finally:
+            if resp is not None:
+                resp.close()
+            agent_run_tracker.clear_running(pseudo_binding["user_id"], agent_type)
 
     def route_discussion_message(
         self,
