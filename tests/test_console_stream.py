@@ -79,6 +79,23 @@ class ConsoleStreamTest(unittest.TestCase):
         resp.close.assert_called_once()
         cleared.assert_called_once()
 
+    def test_tool_progress_frames_are_relayed_without_extra_fields(self):
+        resp = sse_response([
+            'data: {"type":"tool","id":"t1","name":"crm_update_lead","status":"running","args":{"email":"a@b.c"}}', "",
+            'data: {"type":"tool","id":"t1","name":"crm_update_lead","status":"done"}', "",
+            'data: {"type":"tool","id":"t2","name":"x","status":"weird"}', "",
+            'data: {"type":"done","pending_approval":null}', "",
+        ])
+        frames, _, _ = run_stream(resp)
+        self.assertEqual(
+            frames,
+            [
+                {"type": "tool", "id": "t1", "name": "crm_update_lead", "status": "running"},
+                {"type": "tool", "id": "t1", "name": "crm_update_lead", "status": "done"},
+                {"type": "done", "pending_approval": None},
+            ],
+        )
+
     def test_pending_approval_hint_arrives_as_a_last_chunk(self):
         pending = {"id": "p1", "tool_name": "send_mail", "risk_tier": "high"}
 

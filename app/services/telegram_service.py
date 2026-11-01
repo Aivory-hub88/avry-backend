@@ -1220,6 +1220,16 @@ class TelegramService:
                     if content:
                         reply_len += len(content)
                         yield {"type": "chunk", "content": content}
+                elif kind == "tool":
+                    # Progress only: the runtime sends the tool name and a coarse status, never args/results.
+                    status = frame.get("status")
+                    if status in ("running", "done"):
+                        yield {
+                            "type": "tool",
+                            "id": str(frame.get("id") or "")[:64],
+                            "name": str(frame.get("name") or "")[:128],
+                            "status": status,
+                        }
                 elif kind == "done":
                     pending = frame.get("pending_approval")
                     # Same protocol hint the blocking path appends to the reply text.
