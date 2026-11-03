@@ -1034,6 +1034,11 @@ class TelegramService:
             team_agents = self._team_active_agents(binding, channel)
             if team_agents:
                 message["active_agents"] = team_agents
+            # A workspace room turn names its room, so Cerveau gives that room
+            # one shared python_execute workspace instead of the leader's
+            # personal Console one. Console/Telegram turns never carry it.
+            if channel == "discussion" and binding.get("space_id"):
+                message["space_id"] = str(binding["space_id"])[:128]
             if binding.get("turn_origin"):
                 message["turn_origin"] = binding["turn_origin"]
             resp = requests.post(

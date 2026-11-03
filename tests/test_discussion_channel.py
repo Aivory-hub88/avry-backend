@@ -104,6 +104,47 @@ class DiscussionChannelTest(unittest.TestCase):
         self.assertEqual(captured["channel"], "discussion")
         self.assertEqual(out["team_actions"], [{"kind": "message", "to": "Geno", "text": "fyi"}])
 
+    def _post_captured(self, binding, channel):
+        from unittest.mock import MagicMock
+
+        svc = make_service()
+        captured = {}
+
+        class FakeResp:
+            ok = True
+
+            def json(self):
+                return {"reply": "ok"}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured.update(json)
+            return FakeResp()
+
+        with (
+            patch("requests.post", side_effect=fake_post),
+            patch.object(ts, "settings", MagicMock(telegram_agent_gateway_url="http://x")),
+            patch.object(ts.TelegramService, "_team_active_agents", return_value=None),
+        ):
+            svc._route_to_agent(binding, "hi", channel=channel)
+        return captured
+
+    def test_room_turn_forwards_space_id(self):
+        binding = {
+            "user_id": "u1", "agent_type": "leads_qualifier", "account_type": "free",
+            "chat_id": 0, "space_id": "space-1",
+            "binding_id": "discussion_u1_space-1_root-1_leads_qualifier",
+            "room_session_id": "discussion_u1_space-1_root-1",
+        }
+        self.assertEqual(self._post_captured(binding, "discussion")["space_id"], "space-1")
+
+    def test_console_and_telegram_turns_never_carry_space_id(self):
+        binding = {
+            "user_id": "u1", "agent_type": "leads_qualifier", "account_type": "free",
+            "chat_id": 7, "space_id": "space-1", "binding_id": "b1",
+        }
+        self.assertNotIn("space_id", self._post_captured(binding, "console"))
+        self.assertNotIn("space_id", self._post_captured(binding, "telegram"))
+
     def test_conversational_approval_short_circuits(self):
         svc = make_service()
         user = {"user_id": "u1", "account_type": "free"}
