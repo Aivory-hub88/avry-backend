@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LinkedIn is toggleable for office_assistant + autonomous only (must match
+"""LinkedIn is toggleable for office_assistant, autonomous and leads_qualifier only (must match
 Cerveau's bundles). Run: python3 -m unittest tests.test_tool_scope_linkedin"""
 import sys
 import unittest
@@ -14,7 +14,8 @@ class LinkedInScopeTest(unittest.TestCase):
     def test_assignment(self):
         self.assertIn("linkedin", T["office_assistant"])
         self.assertIn("linkedin", T["autonomous"])
-        for agent in ("customer_service", "leads_qualifier", "finance_invoice_ops"):
+        self.assertIn("linkedin", T["leads_qualifier"])
+        for agent in ("customer_service", "finance_invoice_ops"):
             self.assertNotIn("linkedin", T[agent])
 
     def test_no_duplicates(self):
