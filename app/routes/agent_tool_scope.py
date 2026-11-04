@@ -50,6 +50,9 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # (docs/CERVEAU-TOOLKIT-EXPANSION-PLAN.md): closes the blueprintPlanner
 # Email/Calendar default gaps + ADR-007's Product-tracking open decision
 # (both Trello and Linear wired, not one).
+# LinkedIn added 2026-11-04 (office_assistant + autonomous): posting/comments/profile
+# via Composio; every write stays behind approval. Needs the Cerveau MCP server +
+# bundle (ops/cerveau-config) before the gate has anything to grant.
 # Tier-2 Lex outbound added 2026-09-16 (docs/CERVEAU-TIER2-BYO-PLAN.md):
 # Smartlead/Prospeo/MillionVerifier are pure BYO API keys via Composio
 # custom auth configs (same shape as ERPNext). All sends gate behind F-1
@@ -58,7 +61,7 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
     "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify", "googledrive", "googlesheets"],
-    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear", "googledrive", "googlesheets", "googledocs"],
+    "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear", "googledrive", "googlesheets", "googledocs", "linkedin"],
     "finance_invoice_ops": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
@@ -66,7 +69,7 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
         "zendesk", "hubspot", "slack", "asana", "erpnext",
         "gmail", "outlook", "googlecalendar", "trello", "linear",
         "smartlead", "prospeo", "millionverifier", "emaillistverify",
-        "googledrive", "googlesheets", "googledocs",
+        "googledrive", "googlesheets", "googledocs", "linkedin",
     ],
 }
 
