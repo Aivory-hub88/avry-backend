@@ -1,4 +1,4 @@
-"""Sliding refresh-window tests (30-day session for active users).
+"""Sliding refresh-window tests (365-day session for active users).
 
 Uses the JSON fallback store (dict-backed, no Postgres, no files) so the
 sliding-expiry logic is exercised without any infrastructure.
@@ -49,19 +49,22 @@ class SlidingRefreshTest(unittest.TestCase):
         })
         return rt
 
-    def test_window_is_30_days(self):
-        self.assertEqual(REFRESH_TOKEN_EXPIRE_DAYS, 30)
+    def test_window_is_a_year(self):
+        self.assertEqual(REFRESH_TOKEN_EXPIRE_DAYS, 365)
 
     def test_successful_refresh_slides_expiry(self):
         rt = self._login_session(days_valid=1)
         pair = _run(self.svc.refresh_access_token(rt))
         self.assertTrue(pair.access_token)
-        # Same (unrotated) refresh token back.
-        self.assertEqual(pair.refresh_token, rt)
+        # A fresh refresh JWT for the SAME session comes back, so the token's
+        # own exp slides with the session row; the old token still verifies.
+        self.assertTrue(pair.refresh_token)
+        self.assertEqual(self.svc.verify_refresh_token(pair.refresh_token)["session_id"], self.session_id)
+        self.assertIsNotNone(self.svc.verify_refresh_token(rt))
         row = self.db.load_json("sessions", self.session_id)
         new_exp = datetime.fromisoformat(row["expires_at"])
         remaining = (new_exp - datetime.now(timezone.utc)).days
-        self.assertGreaterEqual(remaining, 29)
+        self.assertGreaterEqual(remaining, 364)
 
     def test_expired_session_still_rejected(self):
         rt = self.svc.create_refresh_token(self.user_id, self.session_id)
@@ -69,7 +72,7 @@ class SlidingRefreshTest(unittest.TestCase):
             "session_id": self.session_id,
             "user_id": self.user_id,
             "refresh_token": rt,
-            # JWT itself still valid (30d) but the server-side row lapsed.
+            # JWT itself still valid but the server-side row lapsed.
             "expires_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
             "created_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),
         })
