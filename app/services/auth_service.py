@@ -47,13 +47,22 @@ def _access_ttl_minutes() -> int:
 
 
 ACCESS_TOKEN_EXPIRE_MINUTES = _access_ttl_minutes()
-# Refresh window: 30 days SLIDING (was 7 days absolute). Every successful
-# refresh pushes the server-side session expiry out another 30 days, so an
-# active user never hits a login wall while an idle one ages out — the
-# standard "remember me" shape for a dashboard web app. The short-lived
-# access token stays short on purpose (stolen-token blast radius); only
-# this revocable, server-tracked session lives long.
-REFRESH_TOKEN_EXPIRE_DAYS = 30
+# Refresh window: 365 days SLIDING (was 30). Every successful refresh pushes
+# the server-side session expiry out another year, so a user stays signed in
+# until they log out themselves; only a session idle for a full year ages out.
+# The dashboards refresh silently in the background (keepSessionFresh), so the
+# short-lived access token stays short on purpose (stolen-token blast radius);
+# only this revocable, server-tracked session lives long. Logout revokes the
+# session row. Override with REFRESH_TOKEN_EXPIRE_DAYS (1 .. 730).
+def _refresh_ttl_days() -> int:
+    try:
+        value = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "365"))
+    except ValueError:
+        value = 365
+    return max(1, min(value, 730))
+
+
+REFRESH_TOKEN_EXPIRE_DAYS = _refresh_ttl_days()
 
 
 def _now() -> datetime:
@@ -434,9 +443,14 @@ class AuthService:
         if not user:
             raise ValueError("User not found")
 
+        # The refresh JWT carries its own `exp`, fixed at issue time, so a
+        # sliding session row alone would still die at login + window. Re-issue
+        # the JWT for the SAME session_id so its lifetime slides too. The old
+        # token stays valid until its own exp (the session row, not the token
+        # string, is what is checked), so racing tabs/pollers are not logged out.
         return TokenPair(
             access_token=self.create_access_token(user),
-            refresh_token=refresh_token,
+            refresh_token=self.create_refresh_token(user_id, session_id),
         )
 
     async def logout(self, refresh_token: str) -> bool:
