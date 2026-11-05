@@ -47,18 +47,18 @@ def _access_ttl_minutes() -> int:
 
 
 ACCESS_TOKEN_EXPIRE_MINUTES = _access_ttl_minutes()
-# Refresh window: 365 days SLIDING (was 30). Every successful refresh pushes
-# the server-side session expiry out another year, so a user stays signed in
-# until they log out themselves; only a session idle for a full year ages out.
+# Refresh window: 33 days SLIDING (was 365). Every successful refresh pushes
+# the server-side session expiry out another 33 days, so an active user stays signed in
+# until they log out themselves; a session idle for 33 days ages out.
 # The dashboards refresh silently in the background (keepSessionFresh), so the
 # short-lived access token stays short on purpose (stolen-token blast radius);
 # only this revocable, server-tracked session lives long. Logout revokes the
 # session row. Override with REFRESH_TOKEN_EXPIRE_DAYS (1 .. 730).
 def _refresh_ttl_days() -> int:
     try:
-        value = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "365"))
+        value = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "33"))
     except ValueError:
-        value = 365
+        value = 33
     return max(1, min(value, 730))
 
 
