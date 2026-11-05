@@ -1,4 +1,4 @@
-"""Sliding refresh-window tests (365-day session for active users).
+"""Sliding refresh-window tests (33-day session for active users).
 
 Uses the JSON fallback store (dict-backed, no Postgres, no files) so the
 sliding-expiry logic is exercised without any infrastructure.
@@ -49,8 +49,8 @@ class SlidingRefreshTest(unittest.TestCase):
         })
         return rt
 
-    def test_window_is_a_year(self):
-        self.assertEqual(REFRESH_TOKEN_EXPIRE_DAYS, 365)
+    def test_window_is_33_days(self):
+        self.assertEqual(REFRESH_TOKEN_EXPIRE_DAYS, 33)
 
     def test_successful_refresh_slides_expiry(self):
         rt = self._login_session(days_valid=1)
@@ -64,7 +64,7 @@ class SlidingRefreshTest(unittest.TestCase):
         row = self.db.load_json("sessions", self.session_id)
         new_exp = datetime.fromisoformat(row["expires_at"])
         remaining = (new_exp - datetime.now(timezone.utc)).days
-        self.assertGreaterEqual(remaining, 364)
+        self.assertGreaterEqual(remaining, 32)
 
     def test_expired_session_still_rejected(self):
         rt = self.svc.create_refresh_token(self.user_id, self.session_id)
