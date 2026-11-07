@@ -85,9 +85,10 @@ CREDIT_COST_USD = 0.004365
 OPENROUTER_FEE = 1.055
 
 #: Tokens one credit buys on DeepSeek V4.1 Flash, for display only (the
-#: ledger meters dollars). Blended 85% input (half cache hits) / 15% output.
-TOKENS_PER_CREDIT_PEAK = 13000
-TOKENS_PER_CREDIT_OFFPEAK = 26000
+#: ledger meters dollars). Published range since 2026-11-07: Operational's
+#: 1,500 credits read as about 42M-65M tokens a month.
+TOKENS_PER_CREDIT_PEAK = 28000
+TOKENS_PER_CREDIT_OFFPEAK = 43334
 
 #: One credit used to be one agent message. Balances still in those units are
 #: converted on first touch: the unspent part of the monthly allowance keeps
