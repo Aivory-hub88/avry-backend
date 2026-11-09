@@ -1,5 +1,5 @@
 """
-Agent roster — the canonical, public list of Aivory's six deployable agent
+Agent roster — the canonical, public list of Aivory's deployable agent
 personas (id, first-name identity, title).
 
 Exists so external integrations that need to offer "pick which Aivory agent
@@ -33,6 +33,7 @@ AGENT_ROSTER = [
     {"agent_type": "leads_qualifier", "name": "Lex", "title": "Sales and Lead Agent"},
     {"agent_type": "finance_invoice_ops", "name": "Finn", "title": "Finance & Invoice Ops Agent"},
     {"agent_type": "office_assistant", "name": "Ofira", "title": "Office Assistant"},
+    {"agent_type": "data_analyst", "name": "Ivo", "title": "Data & Reporting Analyst"},
     {"agent_type": "chief_of_staff", "name": "Aira", "title": "Chief of Staff Agent"},
 ]
 
