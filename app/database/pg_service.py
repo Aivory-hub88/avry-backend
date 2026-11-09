@@ -222,7 +222,8 @@ INSERT INTO agent_catalog (id, name, description, category, tags, status, config
   ('leads_qualifier', 'Leads Qualifier Agent', 'Filter inbound leads using the BANT framework. Qualified leads are automatically routed to sales.', 'built-in', ARRAY['BANT scoring','Lead capture','Sales routing','Web search'], 'published', '{}'::jsonb, 'system'),
   ('finance_invoice_ops', 'Finance & Invoice Ops Agent', 'Automate invoice processing, anomaly detection, and multi-tier approval routing - end to end.', 'built-in', ARRAY['Invoice ledger','Anomaly flags','Approval routing','Calculator'], 'published', '{}'::jsonb, 'system'),
   ('office_assistant', 'Office Assistant', 'Save 4 hours per week by automatically extracting action items and syncing decisions to your workspace.', 'built-in', ARRAY['Meeting summaries','Action items','Notion sync','Slack alerts','Sheets log'], 'published', '{"enterprise": true}'::jsonb, 'system'),
-  ('data_analyst', 'Data & Reporting Analyst', 'Weekly business reports, KPI answers with their sources, sales forecasts and early warnings. Read-only: it never changes your data.', 'built-in', ARRAY['Weekly report','KPIs with sources','Forecast','Anomaly flags'], 'published', '{}'::jsonb, 'system')
+  ('data_analyst', 'Data & Reporting Analyst', 'Weekly business reports, KPI answers with their sources, sales forecasts and early warnings. Read-only: it never changes your data.', 'built-in', ARRAY['Weekly report','KPIs with sources','Forecast','Anomaly flags'], 'published', '{}'::jsonb, 'system'),
+  ('operations_inventory', 'Operations & Inventory Agent', 'Daily stock checks, reorder suggestions with the maths shown, and draft purchase orders. Nothing is confirmed or sent without your approval.', 'built-in', ARRAY['Low-stock list','Reorder suggestions','Draft purchase orders','Late deliveries'], 'published', '{}'::jsonb, 'system')
 ON CONFLICT (id) DO NOTHING;
 
 -- Free assessment leads — one row per completed public assessment on
