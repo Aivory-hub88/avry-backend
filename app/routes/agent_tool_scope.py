@@ -74,6 +74,12 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     # her stock files. Odoo is a separate Od-MCP connection, not a toolkit here.
     # Matches [agent_type_mcp_bundles.operations_inventory]; subset of autonomous.
     "operations_inventory": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
+    # Mira (marketing_content, 2026-11): drafts only. Google Docs/Sheets/Drive for the
+    # calendar and drafts, Gmail for email-campaign drafts (send is approval-gated).
+    # No social-posting toolkits in v1 (publishing is Mira phase 2, plan section 3.3).
+    # Matches [agent_type_mcp_bundles.marketing_content] (capped at 6 servers; Outlook
+    # and Odoo-side reads are later additions). Must stay a subset of autonomous.
+    "marketing_content": ["gmail", "googledrive", "googlesheets", "googledocs"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
