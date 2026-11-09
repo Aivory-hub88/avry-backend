@@ -35,6 +35,7 @@ AGENT_ROSTER = [
     {"agent_type": "office_assistant", "name": "Ofira", "title": "Office Assistant"},
     {"agent_type": "data_analyst", "name": "Ivo", "title": "Data & Reporting Analyst"},
     {"agent_type": "operations_inventory", "name": "Juno", "title": "Operations & Inventory Agent"},
+    {"agent_type": "marketing_content", "name": "Mira", "title": "Marketing & Content Agent"},
     {"agent_type": "chief_of_staff", "name": "Aira", "title": "Chief of Staff Agent"},
 ]
 
