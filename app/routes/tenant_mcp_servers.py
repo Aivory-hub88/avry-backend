@@ -708,11 +708,20 @@ _FINANCE_ODOO_METHODS = [
     "account.move.action_post",
     "account.move.button_draft",
 ]
+# Juno (operations_inventory): confirming/cancelling a purchase order and
+# validating a stock transfer. Every one is parked as an F-1 approval in Cerveau;
+# creating a DRAFT PO is a plain create, also gated. No price changes.
+_OPS_ODOO_METHODS = [
+    "purchase.order.button_confirm",
+    "purchase.order.button_cancel",
+    "stock.picking.button_validate",
+]
 _ODOO_METHODS_BY_AGENT = {
+    "operations_inventory": _OPS_ODOO_METHODS,
     "leads_qualifier": _SALES_ODOO_METHODS,
     "finance_invoice_ops": _FINANCE_ODOO_METHODS,
     # Generalist: the one agent that carries every toolkit.
-    "autonomous": _SALES_ODOO_METHODS + _FINANCE_ODOO_METHODS,
+    "autonomous": _SALES_ODOO_METHODS + _FINANCE_ODOO_METHODS + _OPS_ODOO_METHODS,
 }
 
 

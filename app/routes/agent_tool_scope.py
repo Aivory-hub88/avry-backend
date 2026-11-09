@@ -69,6 +69,11 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     # [agent_type_mcp_bundles.data_analyst] (capped at 6 servers); Zendesk, SAP and
     # Google Docs are later additions. Must stay a subset of the autonomous union.
     "data_analyst": ["hubspot", "erpnext", "googledrive", "googlesheets"],
+    # Juno (operations_inventory, 2026-11): stock and purchasing. ERPNext for
+    # stock/PO, mail for supplier drafts (send is approval-gated), Sheets/Drive for
+    # her stock files. Odoo is a separate Od-MCP connection, not a toolkit here.
+    # Matches [agent_type_mcp_bundles.operations_inventory]; subset of autonomous.
+    "operations_inventory": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
