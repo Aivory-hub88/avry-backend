@@ -63,6 +63,12 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify", "googledrive", "googlesheets", "linkedin"],
     "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear", "googledrive", "googlesheets", "googledocs", "linkedin"],
     "finance_invoice_ops": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
+    # Ivo (data_analyst, 2026-11): read-only on business systems, plus Google
+    # Sheets/Docs/Drive for his own report files. No mail, no ERP writes
+    # (docs/CERVEAU-NEW-AGENTS-PLAN.md section 3.1). Matches the MCP bundles in
+    # [agent_type_mcp_bundles.data_analyst] (capped at 6 servers); Zendesk, SAP and
+    # Google Docs are later additions. Must stay a subset of the autonomous union.
+    "data_analyst": ["hubspot", "erpnext", "googledrive", "googlesheets"],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
