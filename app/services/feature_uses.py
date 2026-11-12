@@ -23,9 +23,12 @@ excepted: their features came free with partner access).
 
 Free accounts (since 2026-11-12, accounts with no purchase may sign in and
 see the dashboard as a preview) get a one-time FREE_GRANTS allowance the first
-time they are looked at: 2 diagnostics and 1 workflow-copilot session. It is
-granted once per account (unique ref), never to staff or partners, and never
-to an account that already bought something.
+time they are looked at. Since the evening of 2026-11-12 that allowance is
+EMPTY: the Deep Diagnostic report and the Workflow Copilot are LLM work (and
+workflows deploy to n8n), so both are paid-only; free accounts get the
+non-LLM free analysis instead. The machinery stays so a grant can come back
+by editing FREE_GRANTS. A grant is made once per account (unique ref), never
+to staff or partners, and never to an account that already bought something.
 
 `copilot` is only ever charged for accounts without a paid plan; the dashboard
 lets paying accounts use the copilot freely. A copilot session has no single
@@ -47,8 +50,11 @@ logger = logging.getLogger(__name__)
 
 USES_PER_PURCHASE = 3
 FEATURES = ("snapshot", "blueprint", "copilot")
-#: One-time allowance for an account that has never bought anything.
-FREE_GRANTS = {"snapshot": 2, "copilot": 1}
+#: One-time allowance for an account that has never bought anything. Empty
+#: since 2026-11-12: "snapshot" (the LLM Deep Diagnostic report) and "copilot"
+#: (Workflow Copilot) are paid-only. Free rows left over for a feature that is
+#: no longer in this map are ignored by _balance, so they cannot be spent.
+FREE_GRANTS: Dict[str, int] = {}
 #: Turns allowed inside one trial session (enough to clarify, generate, test
 #: and fix once). Only features listed here can use the trial calls.
 TRIAL_MAX_TURNS = {"copilot": 12}
@@ -239,14 +245,18 @@ def _seed_free(cur, user_id: str, feature: str) -> None:
 
 
 def _balance(cur, user_id: str, feature: str) -> Dict[str, int]:
+    # A feature that is no longer free must not stay spendable through an
+    # old free grant row.
+    count_free = feature in FREE_GRANTS
     cur.execute(
         """
         SELECT COALESCE(sum(delta), 0),
                COALESCE(sum(delta) FILTER (WHERE delta > 0), 0),
                count(*) FILTER (WHERE reason = 'use')
-        FROM billing.feature_uses WHERE user_id = %s AND feature = %s
+        FROM billing.feature_uses
+        WHERE user_id = %s AND feature = %s AND (reason <> 'free' OR %s)
         """,
-        (user_id, feature),
+        (user_id, feature, count_free),
     )
     remaining, granted, used = cur.fetchone()
     return {"remaining": max(int(remaining), 0), "granted": int(granted), "used": int(used)}
