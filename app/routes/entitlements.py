@@ -366,7 +366,7 @@ def list_grants(user_id: str):
 
 
 class ConsumeRequest(BaseModel):
-    feature: str = Field(pattern="^(snapshot|blueprint)$")
+    feature: str = Field(pattern="^(snapshot|blueprint|copilot)$")
     # The generator's job id: charging the same finished job again is a no-op.
     ref: str = Field(min_length=1, max_length=200)
 
@@ -421,7 +421,7 @@ def consume_use(body: ConsumeRequest, payload: dict = Depends(current_payload)):
     except feature_uses.NoUsesLeft:
         raise HTTPException(
             status_code=402,
-            detail=f"You have used all {feature_uses.USES_PER_PURCHASE} runs included with your purchase.",
+            detail="You have used all the runs on your account.",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

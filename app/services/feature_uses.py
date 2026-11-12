@@ -21,6 +21,15 @@ Unlimited: superadmins/admins, and partner accounts while their partner access
 are seeded with USES_PER_PURCHASE the first time they are looked at (partners
 excepted: their features came free with partner access).
 
+Free accounts (since 2026-11-12, accounts with no purchase may sign in and
+see the dashboard as a preview) get a one-time FREE_GRANTS allowance the first
+time they are looked at: 2 diagnostics and 1 workflow-copilot session. It is
+granted once per account (unique ref), never to staff or partners, and never
+to an account that already bought something.
+
+`copilot` is only ever charged for accounts without a paid plan; the dashboard
+lets paying accounts use the copilot freely.
+
 Sync psycopg2 per call, like credit_service and entitlement_state.
 """
 
@@ -33,16 +42,18 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 USES_PER_PURCHASE = 3
-FEATURES = ("snapshot", "blueprint")
+FEATURES = ("snapshot", "blueprint", "copilot")
+#: One-time allowance for an account that has never bought anything.
+FREE_GRANTS = {"snapshot": 2, "copilot": 1}
 
 SCHEMA_SQL = """
 CREATE SCHEMA IF NOT EXISTS billing;
 CREATE TABLE IF NOT EXISTS billing.feature_uses (
     id         BIGSERIAL PRIMARY KEY,
     user_id    TEXT NOT NULL,
-    feature    TEXT NOT NULL CHECK (feature IN ('snapshot', 'blueprint')),
+    feature    TEXT NOT NULL CHECK (feature IN ('snapshot', 'blueprint', 'copilot')),
     delta      INTEGER NOT NULL,
-    reason     TEXT NOT NULL,           -- purchase | legacy | use
+    reason     TEXT NOT NULL,           -- purchase | legacy | free | use
     ref        TEXT,                    -- order id, user id (legacy) or job id
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -50,6 +61,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS feature_uses_ref_idx
     ON billing.feature_uses (feature, reason, ref) WHERE ref IS NOT NULL;
 CREATE INDEX IF NOT EXISTS feature_uses_user_idx
     ON billing.feature_uses (user_id, feature);
+"""
+
+# Tables created before `copilot` existed carry the two-feature CHECK.
+_WIDEN_FEATURE_CHECK_SQL = """
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'billing.feature_uses'::regclass
+          AND conname = 'feature_uses_feature_check'
+          AND pg_get_constraintdef(oid) NOT LIKE '%copilot%'
+    ) THEN
+        ALTER TABLE billing.feature_uses DROP CONSTRAINT feature_uses_feature_check;
+        ALTER TABLE billing.feature_uses ADD CONSTRAINT feature_uses_feature_check
+            CHECK (feature IN ('snapshot', 'blueprint', 'copilot'));
+    END IF;
+END $$;
 """
 
 _schema_ready = False
@@ -73,6 +101,7 @@ def ensure_schema(cur) -> None:
     if _schema_ready:
         return
     cur.execute(SCHEMA_SQL)
+    cur.execute(_WIDEN_FEATURE_CHECK_SQL)
     _schema_ready = True
 
 
@@ -146,6 +175,50 @@ def _seed_legacy(cur, user_id: str, feature: str) -> None:
         )
 
 
+def _seed_free(cur, user_id: str, feature: str) -> None:
+    """The one-time free allowance, for an account that never bought anything."""
+    amount = FREE_GRANTS.get(feature)
+    if not amount:
+        return
+    ref = f"free:{feature}:{user_id}"
+    cur.execute(
+        "SELECT 1 FROM billing.feature_uses WHERE feature = %s AND reason = 'free' AND ref = %s",
+        (feature, ref),
+    )
+    if cur.fetchone():
+        return
+    cur.execute(
+        """
+        SELECT COALESCE(u.account_type, ''),
+               COALESCE(u.is_superadmin, false),
+               EXISTS (SELECT 1 FROM billing.feature_uses f
+                        WHERE f.user_id = u.id AND f.reason IN ('purchase', 'legacy')),
+               EXISTS (SELECT 1 FROM identity.user_tiers t
+                        WHERE t.user_id = u.id
+                          AND (t.expires_at IS NULL OR t.expires_at > now())
+                          AND COALESCE(t.tier, 'free') <> 'free')
+        FROM identity.users u WHERE u.id = %s
+        """,
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return
+    account_type, is_superadmin, bought, live_plan = row
+    if is_superadmin or str(account_type).lower() in ("admin", "superadmin", "employee", "demo", "partner"):
+        return
+    if bought or live_plan:
+        return
+    cur.execute(
+        """
+        INSERT INTO billing.feature_uses (user_id, feature, delta, reason, ref)
+        VALUES (%s, %s, %s, 'free', %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (user_id, feature, amount, ref),
+    )
+
+
 def _balance(cur, user_id: str, feature: str) -> Dict[str, int]:
     cur.execute(
         """
@@ -175,6 +248,7 @@ def status(user_id: str) -> Dict[str, Dict[str, object]]:
             for feature in FEATURES:
                 _lock(cur, user_id, feature)
                 _seed_legacy(cur, user_id, feature)
+                _seed_free(cur, user_id, feature)
                 out[feature] = {**_balance(cur, user_id, feature), "unlimited": unlimited}
         conn.commit()
         return out
@@ -212,6 +286,7 @@ def consume(user_id: str, feature: str, ref: str) -> Dict[str, object]:
                 conn.commit()
                 return {"charged": False, "unlimited": False, **bal}
             _seed_legacy(cur, user_id, feature)
+            _seed_free(cur, user_id, feature)
             bal = _balance(cur, user_id, feature)
             if bal["remaining"] <= 0:
                 conn.rollback()

@@ -41,7 +41,8 @@ class FeatureUses(unittest.TestCase):
             )
             cur.execute(
                 "INSERT INTO identity.users (id, account_type) VALUES "
-                "('buyer','free'), ('legacy','paid'), ('partner','partner'), ('lapsed_partner','partner'), ('boss','superadmin')"
+                "('buyer','free'), ('legacy','paid'), ('partner','partner'), ('lapsed_partner','partner'), ('boss','superadmin'), "
+                "('newbie','free'), ('demo1','demo')"
             )
             cur.execute(
                 """
@@ -106,6 +107,49 @@ class FeatureUses(unittest.TestCase):
         self.assertFalse(self.fu.status("lapsed_partner")["snapshot"]["unlimited"])
         # Its free-period features were not a purchase: no runs once it lapses.
         self.assertEqual(self.fu.status("lapsed_partner")["snapshot"]["remaining"], 0)
+
+    def test_free_account_gets_two_diagnostics_and_one_copilot_once(self):
+        st = self.fu.status("newbie")
+        self.assertEqual(
+            (st["snapshot"]["remaining"], st["copilot"]["remaining"], st["blueprint"]["remaining"]), (2, 1, 0)
+        )
+        self.fu.status("newbie")  # looking again never grants again
+        self.fu.consume("newbie", "snapshot", "d1")
+        self.fu.consume("newbie", "snapshot", "d2")
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.consume("newbie", "snapshot", "d3")
+        self.fu.consume("newbie", "copilot", "copilot:s1")
+        self.assertFalse(self.fu.consume("newbie", "copilot", "copilot:s1")["charged"])  # same session
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.consume("newbie", "copilot", "copilot:s2")
+
+    def test_buying_after_the_free_runs_adds_three(self):
+        self.fu.consume("newbie", "snapshot", "d1")
+        self._grant("newbie", "ai_snapshot", "o9")
+        self.assertEqual(self.fu.status("newbie")["snapshot"]["remaining"], 4)
+
+    def test_buyers_staff_and_partners_get_no_free_grant(self):
+        self._grant("buyer", "ai_blueprint", "o10")
+        self.assertEqual(self.fu.status("buyer")["snapshot"]["remaining"], 0)
+        self.assertEqual(self.fu.status("legacy")["copilot"]["remaining"], 0)
+        self.assertEqual(self.fu.status("lapsed_partner")["copilot"]["remaining"], 0)
+        self.assertEqual(self.fu.status("demo1")["snapshot"]["remaining"], 0)
+
+    def test_an_old_two_feature_table_is_widened_for_copilot(self):
+        import psycopg2
+
+        conn = psycopg2.connect(DB)
+        with conn.cursor() as cur:
+            cur.execute("DROP SCHEMA IF EXISTS billing CASCADE; CREATE SCHEMA billing")
+            cur.execute(
+                "CREATE TABLE billing.feature_uses (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, "
+                "feature TEXT NOT NULL CHECK (feature IN ('snapshot', 'blueprint')), delta INTEGER NOT NULL, "
+                "reason TEXT NOT NULL, ref TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+            )
+        conn.commit()
+        conn.close()
+        self.fu._schema_ready = False
+        self.assertEqual(self.fu.status("newbie")["copilot"]["remaining"], 1)
 
 
 if __name__ == "__main__":
