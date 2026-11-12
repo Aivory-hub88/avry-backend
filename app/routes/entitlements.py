@@ -34,7 +34,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from app.routes.deps import current_payload
-from app.services import credit_service, feature_uses
+from app.services import access, credit_service, feature_uses
 
 logger = logging.getLogger(__name__)
 
@@ -376,6 +376,27 @@ def _caller_id(payload: dict) -> str:
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")
     return user_id
+
+
+@router.get("/access")
+def get_access(payload: dict = Depends(current_payload)):
+    """
+    What the caller may use right now, for server-side paid-feature gates
+    (the user dashboard's plan gate). Read fresh from Postgres on every call.
+
+    503 when the entitlement tables can't be read: a gate must fail closed
+    instead of treating that as "no plan" (which `/auth/me`, a best-effort
+    display endpoint, does). 401 when the token's account no longer exists.
+    """
+    user_id = _caller_id(payload)
+    try:
+        state = access.read(user_id)
+    except access.AccessUnavailable as e:
+        logger.error("Access lookup failed for %s: %s", user_id, e)
+        raise HTTPException(status_code=503, detail="Entitlement service unavailable")
+    if state is None:
+        raise HTTPException(status_code=401, detail="Account not found")
+    return {"ok": True, **state}
 
 
 @router.get("/uses")

@@ -311,21 +311,9 @@ async def health():
     }
 
 
-@app.get("/api/v1/tier/state/{user_id}")
-async def get_tier_state(user_id: str):
-    try:
-        user_data = db_service.load_json("users", user_id)
-        if not user_data:
-            return {"user_id": user_id, "tier": "unknown", "status": "not_found"}
-        return {
-            "user_id": user_id,
-            "tier": user_data.get("tier", "free"),
-            "account_type": user_data.get("account_type", "free"),
-            "credits": user_data.get("credits", 0),
-            "status": "active",
-        }
-    except Exception as e:
-        return {"user_id": user_id, "tier": "unknown", "status": "error", "error": str(e)}
+# /api/v1/tier/state/{user_id} was removed (2026-11-12): it answered any
+# user's tier and credits by id with no auth, read the legacy JSON users
+# store (empty on prod), and had no callers. Use GET /api/v1/entitlements/access.
 
 
 @app.get("/api/database/status")

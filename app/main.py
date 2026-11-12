@@ -231,51 +231,10 @@ def generate_id(prefix: str = "") -> str:
         return f"{prefix}_{base_id}"
     return base_id
 
-# ===== TIER ENDPOINTS (BEFORE ROUTER REGISTRATION) =====
-@app.get("/api/v1/tier/state/{user_id}")
-async def get_tier_state(user_id: str):
-    """
-    Get user's current tier and subscription state
-    
-    Args:
-        user_id: User identifier
-        
-    Returns:
-        User tier information
-    """
-    print(f"[DEBUG] Tier endpoint called for user: {user_id}")
-    try:
-        # Load user data
-        user_data = db_service.load_json("users", user_id)
-        if not user_data:
-            return {
-                "user_id": user_id,
-                "tier": "unknown",
-                "status": "not_found"
-            }
-        
-        # Return tier information
-        return {
-            "user_id": user_id,
-            "tier": user_data.get("tier", "free"),
-            "account_type": user_data.get("account_type", "free"),
-            "credits": user_data.get("credits", 0),
-            "status": "active",
-            "features": {
-                "diagnostics": True,
-                "blueprint": user_data.get("account_type") != "free",
-                "roadmap": user_data.get("account_type") == "premium",
-                "custom_reports": user_data.get("account_type") == "premium"
-            }
-        }
-    except Exception as e:
-        print(f"Error getting tier state: {e}")
-        return {
-            "user_id": user_id,
-            "tier": "unknown",
-            "status": "error",
-            "error": str(e)
-        }
+# /api/v1/tier/state/{user_id} was removed (2026-11-12): it answered any
+# user's tier and credits by id with no auth, read the legacy JSON users
+# store (empty on prod), and had no callers. Use GET /api/v1/entitlements/access.
+
 
 # Register routes (AFTER tier endpoints)
 if auth_router:
