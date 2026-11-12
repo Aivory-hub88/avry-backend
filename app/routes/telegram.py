@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from app.config import settings
 from app.database.db_service import DatabaseService
 from app.services.auth_service import AuthService
-from app.services import workspace_acting
+from app.services import access, workspace_acting
 from app.services.telegram_service import (
     TelegramService,
     AGENT_TYPES,
@@ -60,11 +60,33 @@ def get_current_user_payload(authorization: Optional[str] = Header(None)) -> dic
     return payload
 
 
+def _require_paid_agents(user_id: str) -> None:
+    """
+    AI agents (console agent chat, Discussion rooms, Telegram deploys) are a
+    paid feature. Accounts without a plan only preview the dashboard, so they
+    get a 402 the dashboard turns into an upgrade prompt. Fails closed (503)
+    when the entitlement tables can't be read.
+    """
+    try:
+        state = access.read(user_id)
+    except access.AccessUnavailable as e:
+        logger.error("agent access check failed for %s: %s", user_id, e)
+        raise HTTPException(status_code=503, detail="Entitlement service unavailable")
+    if state is None:
+        raise HTTPException(status_code=401, detail="Account not found")
+    if not state["paid"]:
+        raise HTTPException(
+            status_code=402,
+            detail="AI agents are available on paid plans. Upgrade to the Operational plan to use them.",
+        )
+
+
 @router.post("/deploy-link")
 def create_deploy_link(
     body: DeployLinkRequest, user: dict = Depends(get_current_user_payload)
 ):
     """Generate a one-time deep link (rendered as QR by the dashboard)."""
+    _require_paid_agents(user["user_id"])
     try:
         return telegram_service.create_link_token(
             user_id=user["user_id"],
@@ -152,6 +174,7 @@ def _validated_agent_chat(body: AgentChatRequest, user: dict):
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required")
+    _require_paid_agents(user["user_id"])
     record = telegram_service._load_user(user["user_id"]) or {"user_id": user["user_id"]}
     tier_err = agent_tier_error(record, body.agent_type)
     if tier_err:
@@ -236,6 +259,8 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
         logger.info(f"discussion-turn: {owner_id} acting as leader {acting_as} in space {space_id}")
         owner_id = acting_as
 
+    # The tenant that runs (and pays for) the turn must hold a plan.
+    _require_paid_agents(owner_id)
     record = telegram_service._load_user(owner_id) or {"user_id": owner_id}
     tier_err = agent_tier_error(record, body.agent_type)
     if tier_err:

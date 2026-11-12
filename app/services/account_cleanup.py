@@ -69,6 +69,8 @@ async def check_payment_required(user_id: str) -> Optional[datetime]:
     login should proceed normally (staff, already purchased, inactive, or
     the account is simply outside Policy A's scope).
     """
+    if settings.free_accounts_enabled:
+        return None  # free accounts may sign in; see config.free_accounts_enabled
     pool = await pg.get_pool()
     row = await pool.fetchrow(
         f"""
@@ -86,6 +88,8 @@ async def check_payment_required(user_id: str) -> Optional[datetime]:
 
 
 async def _policy_a_warn_candidates(pool) -> list:
+    if settings.free_accounts_enabled:
+        return []  # free accounts are kept; see config.free_accounts_enabled
     return await pool.fetch(
         f"""
         SELECT id, email, created_at FROM users
@@ -100,6 +104,8 @@ async def _policy_a_warn_candidates(pool) -> list:
 
 
 async def _policy_a_delete_candidates(pool) -> list:
+    if settings.free_accounts_enabled:
+        return []  # free accounts are kept; see config.free_accounts_enabled
     return await pool.fetch(
         f"""
         SELECT id, email, account_type, created_at FROM users

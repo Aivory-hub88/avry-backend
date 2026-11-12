@@ -100,6 +100,8 @@ class DiscussionTurnRouteTest(unittest.TestCase):
             }
 
         with (
+            # The tenant holds a paid plan (the paid-agent gate has its own tests).
+            patch.object(tg, "_require_paid_agents", lambda uid: seen.setdefault("paid_checked", uid)),
             patch.object(tg.workspace_acting, "can_act_as", return_value=can_act) as gate,
             patch.object(tg.telegram_service, "_load_user", side_effect=load_user),
             patch.object(tg, "agent_tier_error", return_value=None),

@@ -112,6 +112,17 @@ SEAT_LIMITS: Dict[str, int] = {
 #: Seats for an account without a live subscription: itself.
 NO_PLAN_SEATS = 1
 
+#: Monthly credits for an account without a live subscription (a free
+#: account, a lapsed subscriber, a one-time buyer): none. Credits pay for
+#: agent turns, which are a paid feature. Bought top-up credits are separate
+#: (billing.user_credits.extra_balance) and are never taken away.
+NO_PLAN_ALLOWANCE = 0
+
+#: Account types that use the product without a plan of their own (support
+#: staff and demo accounts). They keep the base tier's allowance so demos and
+#: support keep working; superadmins are unlimited in credit_service.
+ALLOWANCE_EXEMPT_ACCOUNT_TYPES = ("admin", "employee", "demo")
+
 #: The value used when an account holds no live subscription: it never paid,
 #: or its entitlement has lapsed. Ranks BELOW every paid tier.
 FREE_TIER = "free"
@@ -186,6 +197,21 @@ def seat_limit(tier: Optional[str], override: Optional[int] = None) -> int:
         return override
     position = rank(tier)
     return NO_PLAN_SEATS if position < 0 else SEAT_LIMITS[CANONICAL_TIERS[position]]
+
+
+def monthly_allowance(tier: Optional[str], account_type: Optional[str] = None) -> int:
+    """
+    Monthly Intelligence Credits for an account: its live plan's allowance,
+    the base allowance for staff/demo accounts without a plan, otherwise
+    `NO_PLAN_ALLOWANCE`. Unlike `normalise()`, `free` and unknown values do
+    NOT fall back to the base paid tier (that showed free accounts 1,500).
+    """
+    position = rank(tier)
+    if position >= 0:
+        return TIER_ALLOWANCES[CANONICAL_TIERS[position]]
+    if str(account_type or "").strip().lower() in ALLOWANCE_EXEMPT_ACCOUNT_TYPES:
+        return TIER_ALLOWANCES[BASE_TIER]
+    return NO_PLAN_ALLOWANCE
 
 
 def meets(tier: Optional[str], minimum: str) -> bool:

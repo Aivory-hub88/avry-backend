@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     # the poller still runs and logs what it would warn/delete, but sends no
     # mail and deletes nothing until this is explicitly turned on.
     account_cleanup_enabled: bool = False
+    # Free accounts (2026-11-12): an account that never bought anything may
+    # sign in and use the dashboard as a preview (2 diagnostics, 1 copilot
+    # session, everything else locked behind an upgrade prompt). While this is
+    # on, Policy A neither blocks their login nor warns/deletes them.
+    free_accounts_enabled: bool = True
     account_cleanup_interval_seconds: int = 1800
 
     # Team Space reminders that fire with the room closed (ADR-021 §4.1, see

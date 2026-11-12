@@ -366,7 +366,7 @@ def list_grants(user_id: str):
 
 
 class ConsumeRequest(BaseModel):
-    feature: str = Field(pattern="^(snapshot|blueprint)$")
+    feature: str = Field(pattern="^(snapshot|blueprint|copilot)$")
     # The generator's job id: charging the same finished job again is a no-op.
     ref: str = Field(min_length=1, max_length=200)
 
@@ -421,7 +421,7 @@ def consume_use(body: ConsumeRequest, payload: dict = Depends(current_payload)):
     except feature_uses.NoUsesLeft:
         raise HTTPException(
             status_code=402,
-            detail=f"You have used all {feature_uses.USES_PER_PURCHASE} runs included with your purchase.",
+            detail="You have used all the runs on your account.",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -429,3 +429,37 @@ def consume_use(body: ConsumeRequest, payload: dict = Depends(current_payload)):
         logger.error("Feature-use charge failed: %s", e)
         raise HTTPException(status_code=503, detail="Usage service unavailable")
     return {"ok": True, **result}
+
+
+class TrialRequest(BaseModel):
+    feature: str = Field(pattern="^copilot$")
+    # The trial session id (the dashboard copilot's sessionId).
+    ref: str = Field(min_length=1, max_length=200)
+
+
+def _trial_call(fn, body: TrialRequest, payload: dict):
+    try:
+        return {"ok": True, **fn(_caller_id(payload), body.feature, body.ref)}
+    except feature_uses.TrialTurnsUsed:
+        raise HTTPException(status_code=402, detail="This free session has ended.")
+    except feature_uses.NoUsesLeft:
+        raise HTTPException(status_code=402, detail="You have used all the runs on your account.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Trial %s failed: %s", fn.__name__, e)
+        raise HTTPException(status_code=503, detail="Usage service unavailable")
+
+
+@router.post("/uses/trial/check")
+def trial_check(body: TrialRequest, payload: dict = Depends(current_payload)):
+    """Before a free-trial turn: 200 when it may run, 402 when it may not.
+    Charges nothing, so a turn that then fails costs nothing."""
+    return _trial_call(feature_uses.trial_check, body, payload)
+
+
+@router.post("/uses/trial/record")
+def trial_record(body: TrialRequest, payload: dict = Depends(current_payload)):
+    """After a free-trial turn worked, just before it is delivered: charges the
+    session's use on its first turn and counts the turn. 402 = don't deliver."""
+    return _trial_call(feature_uses.trial_record, body, payload)

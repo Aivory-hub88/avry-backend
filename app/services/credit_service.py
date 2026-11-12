@@ -41,14 +41,12 @@ logger = logging.getLogger(__name__)
 # The table itself lives in app/services/tiers.py so the gates, the allowances
 # and the published prices cannot drift apart again; the previous comment here
 # still quoted $20/$44, prices that had not been charged for some time.
-# Allowance lookups below deliberately use `tiers.normalise`, NOT
-# `tiers.account_tier`: normalise keeps the base-tier fallback, so an account
-# with no live plan still seeds the same monthly Intelligence Credit allowance
-# it always has. `account_tier` is for gating feature ACCESS; swapping it in
-# here would change how many credits an account is seeded with, which is a
-# separate product decision and is not part of closing the access leak.
+# Allowances come from `tiers.monthly_allowance`: a live plan gets its tier's
+# allowance, staff/demo accounts the base allowance, and an account with no
+# live plan (free, lapsed, one-time buyer) gets none (decided 2026-11-12; it
+# used to fall back to Operational's 1,500 through `tiers.normalise`). Bought
+# top-up credits (extra_balance) are kept either way.
 TIER_ALLOWANCES = tiers.TIER_ALLOWANCES
-DEFAULT_ALLOWANCE = TIER_ALLOWANCES[tiers.BASE_TIER]
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS billing.user_credits (
@@ -119,7 +117,7 @@ def _resolve_access(cur, user_id: str) -> dict:
     )
     row = cur.fetchone()
     if not row:
-        return {"tier": tiers.FREE_TIER, "superadmin": False, "known": False}
+        return {"tier": tiers.FREE_TIER, "account_type": "", "superadmin": False, "known": False}
     account_type, is_superadmin, tier, expires_at = row
     superadmin = bool(is_superadmin) or str(account_type or "").lower() == "superadmin"
     cur.execute("SELECT now()")
@@ -128,6 +126,7 @@ def _resolve_access(cur, user_id: str) -> dict:
         tier = None  # entitlement lapsed -> no plan
     return {
         "tier": tiers.account_tier(tier),
+        "account_type": str(account_type or "").lower(),
         "superadmin": superadmin,
         "known": True,
     }
@@ -233,7 +232,7 @@ def _month_usage(cur, user_id: str, period_start: date) -> Tuple[int, int, int]:
 
 
 def _allowance_for(access: dict) -> int:
-    return TIER_ALLOWANCES.get(tiers.normalise(access["tier"]), DEFAULT_ALLOWANCE)
+    return tiers.monthly_allowance(access["tier"], access.get("account_type"))
 
 
 def get_status(user_id: str) -> dict:
