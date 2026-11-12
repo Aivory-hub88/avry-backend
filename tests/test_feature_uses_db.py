@@ -10,6 +10,7 @@ billing tables there are dropped and recreated).
 import os
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -108,25 +109,43 @@ class FeatureUses(unittest.TestCase):
         # Its free-period features were not a purchase: no runs once it lapses.
         self.assertEqual(self.fu.status("lapsed_partner")["snapshot"]["remaining"], 0)
 
-    def test_free_account_gets_two_diagnostics_and_one_copilot_once(self):
+    def test_free_account_gets_no_deep_diagnostic_and_no_copilot(self):
         st = self.fu.status("newbie")
         self.assertEqual(
-            (st["snapshot"]["remaining"], st["copilot"]["remaining"], st["blueprint"]["remaining"]), (2, 1, 0)
+            (st["snapshot"]["remaining"], st["copilot"]["remaining"], st["blueprint"]["remaining"]), (0, 0, 0)
         )
-        self.fu.status("newbie")  # looking again never grants again
-        self.fu.consume("newbie", "snapshot", "d1")
-        self.fu.consume("newbie", "snapshot", "d2")
         with self.assertRaises(self.fu.NoUsesLeft):
-            self.fu.consume("newbie", "snapshot", "d3")
-        self.fu.consume("newbie", "copilot", "copilot:s1")
-        self.assertFalse(self.fu.consume("newbie", "copilot", "copilot:s1")["charged"])  # same session
+            self.fu.consume("newbie", "snapshot", "d1")
         with self.assertRaises(self.fu.NoUsesLeft):
-            self.fu.consume("newbie", "copilot", "copilot:s2")
+            self.fu.trial_check("newbie", "copilot", "copilot:s1")
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_record("newbie", "copilot", "copilot:s1")
 
-    def test_buying_after_the_free_runs_adds_three(self):
-        self.fu.consume("newbie", "snapshot", "d1")
+    def test_old_free_rows_cannot_be_spent(self):
+        # Granted before the Deep Diagnostic and the Copilot became paid-only.
+        import psycopg2
+
+        self.fu.status("newbie")  # creates the ledger tables
+
+        conn = psycopg2.connect(DB)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO billing.feature_uses (user_id, feature, delta, reason, ref) VALUES "
+                "('newbie', 'snapshot', 2, 'free', 'free:snapshot:newbie'), "
+                "('newbie', 'copilot', 1, 'free', 'free:copilot:newbie')"
+            )
+        conn.commit()
+        conn.close()
+        st = self.fu.status("newbie")
+        self.assertEqual((st["snapshot"]["remaining"], st["copilot"]["remaining"]), (0, 0))
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.consume("newbie", "snapshot", "d1")
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_check("newbie", "copilot", "copilot:s1")
+
+    def test_buying_gives_a_free_account_three_runs(self):
         self._grant("newbie", "ai_snapshot", "o9")
-        self.assertEqual(self.fu.status("newbie")["snapshot"]["remaining"], 4)
+        self.assertEqual(self.fu.status("newbie")["snapshot"]["remaining"], 3)
 
     def test_buyers_staff_and_partners_get_no_free_grant(self):
         self._grant("buyer", "ai_blueprint", "o10")
@@ -135,6 +154,7 @@ class FeatureUses(unittest.TestCase):
         self.assertEqual(self.fu.status("lapsed_partner")["copilot"]["remaining"], 0)
         self.assertEqual(self.fu.status("demo1")["snapshot"]["remaining"], 0)
 
+    @mock.patch.dict('app.services.feature_uses.FREE_GRANTS', {'copilot': 1})
     def test_copilot_trial_charges_on_first_good_turn_and_caps_turns(self):
         # A turn that fails is never recorded: checking alone charges nothing.
         self.fu.trial_check("newbie", "copilot", "copilot:s1")
@@ -157,6 +177,7 @@ class FeatureUses(unittest.TestCase):
         with self.assertRaises(self.fu.TrialTurnsUsed):
             self.fu.trial_record("newbie", "copilot", "copilot:s1")
 
+    @mock.patch.dict('app.services.feature_uses.FREE_GRANTS', {'copilot': 1})
     def test_trial_session_of_someone_else_is_refused(self):
         self.fu.trial_record("newbie", "copilot", "copilot:shared")
         import psycopg2
@@ -176,6 +197,7 @@ class FeatureUses(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.fu.trial_check("newbie", "snapshot", "x")
 
+    @mock.patch.dict('app.services.feature_uses.FREE_GRANTS', {'copilot': 1})
     def test_an_old_two_feature_table_is_widened_for_copilot(self):
         import psycopg2
 
