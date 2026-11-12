@@ -11,6 +11,7 @@ from app.models.user import (
     TokenPair, TokenRefreshRequest, AuthResponse
 )
 from app.services.auth_service import AuthService, PaymentRequiredError
+from app.services import turnstile
 from app.database.db_service import DatabaseService
 from app.utils.cache import cache_user, get_cached_user
 
@@ -46,19 +47,43 @@ def get_token_from_header(authorization: Optional[str] = Header(None)) -> Option
 
 
 @router.post("/register", response_model=AuthResponse)
-async def register(user_data: UserCreate):
+async def register(
+    user_data: UserCreate,
+    request: Request,
+    x_internal_token: Optional[str] = Header(None),
+):
     """
     Register new user account.
-    
+
     Creates user with hashed password, generates JWT tokens,
-    and creates session.
-    
+    and creates session. Public calls must carry a Turnstile token
+    (see app.services.turnstile).
+
     Args:
-        user_data: UserCreate with email, password, company_name
-        
+        user_data: UserCreate with email, password, company_name, turnstile_token
+
     Returns:
         AuthResponse with user info and token pair
     """
+    # Behind Cloudflare + Traefik the client address is only in the headers;
+    # it is advisory for Cloudflare, not a trust boundary.
+    remote_ip = (
+        request.headers.get("cf-connecting-ip")
+        or (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        or None
+    )
+    try:
+        await turnstile.verify_signup(
+            user_data.turnstile_token,
+            remote_ip=remote_ip,
+            x_internal_token=x_internal_token,
+        )
+    except turnstile.TurnstileUnavailable:
+        raise HTTPException(status_code=503, detail="Sign-up is temporarily unavailable")
+    except turnstile.TurnstileRejected as e:
+        logger.warning(f"Registration blocked by Turnstile ({e}) for {user_data.email}")
+        raise HTTPException(status_code=403, detail="Human verification failed. Please try again")
+
     try:
         logger.info(f"Registration attempt for email: {user_data.email}")
         

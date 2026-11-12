@@ -23,6 +23,9 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     company_name: Optional[str] = None
+    # Cloudflare Turnstile token from the landing widget (action "signup").
+    # Checked by app.services.turnstile before the account is created.
+    turnstile_token: Optional[str] = None
 
 
 class UserLogin(BaseModel):
