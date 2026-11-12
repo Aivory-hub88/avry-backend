@@ -145,7 +145,6 @@ class AuthService:
     # ── Tier helpers ──────────────────────────────────────────────────────────
 
     #: Display defaults before the credit ledger overrides them (unchanged).
-    _DEFAULT_CREDITS = {"blueprint": 100, "snapshot": 50, tiers.FREE_TIER: 10}
 
     def _compute_tier(self, user_id: str, account_type: str) -> dict:
         """
@@ -190,7 +189,9 @@ class AuthService:
             )
 
         features = set(state["features"])
-        default = tiers.TIER_ALLOWANCES.get(tier, self._DEFAULT_CREDITS.get(tier, 10))
+        # Same rule as the ledger (credit_service): no live plan, no monthly
+        # credits; the live snapshot below overlays the real balance.
+        default = tiers.monthly_allowance(state.get("subscription_tier") or tier, account_type)
         info = dict(
             tier=tier,
             is_subscribed=state["is_subscribed"],

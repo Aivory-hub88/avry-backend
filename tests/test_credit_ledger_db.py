@@ -41,7 +41,8 @@ class CreditLedger(unittest.TestCase):
             )
             cur.execute(
                 "INSERT INTO identity.users (id, account_type) VALUES "
-                "('biz','paid'), ('ops','paid'), ('old','paid'), ('boss','superadmin')"
+                "('biz','paid'), ('ops','paid'), ('old','paid'), ('boss','superadmin'), "
+                "('newbie','free'), ('demo1','demo')"
             )
             cur.execute(
                 "INSERT INTO identity.user_tiers (user_id, tier) VALUES "
@@ -104,6 +105,23 @@ class CreditLedger(unittest.TestCase):
         # Half the old operational allowance left -> half the new one.
         st = self.cs.get_status("ops")
         self.assertEqual((st["monthly_balance"], st["extra_balance"]), (750, 0))
+
+    def test_free_account_has_no_monthly_credits(self):
+        st = self.cs.get_status("newbie")
+        self.assertEqual((st["allowance"], st["balance"]), (0, 0))
+        with self.assertRaises(self.cs.InsufficientCredits):
+            self.cs.consume("newbie", 1, "agent_message")
+
+    def test_demo_without_a_plan_keeps_the_base_allowance(self):
+        self.assertEqual(self.cs.get_status("demo1")["allowance"], 1500)
+
+    def test_lapsed_plan_drops_the_monthly_allowance_but_keeps_bought_credits(self):
+        self.cs.grant("ops", 1000, reason="purchase")
+        self._sql("UPDATE identity.user_tiers SET expires_at = now() - interval '1 day' WHERE user_id = 'ops'")
+        st = self.cs.get_status("ops")
+        self.assertEqual((st["allowance"], st["monthly_balance"], st["extra_balance"]), (0, 0, 1000))
+        self._sql("UPDATE identity.user_tiers SET expires_at = NULL WHERE user_id = 'ops'")
+        self.assertEqual(self.cs.get_status("ops")["monthly_balance"], 1500)
 
     def test_superadmin_is_unlimited(self):
         self.assertTrue(self.cs.consume("boss", 999, "agent_message")["unlimited"])

@@ -75,13 +75,11 @@ class Gating(unittest.TestCase):
         self.assertFalse(tiers.meets("business", "enterprise"))
 
 
-class CreditAllowanceUnaffected(unittest.TestCase):
-    """The access fix must leave every allowance exactly where it was."""
+class CreditAllowance(unittest.TestCase):
+    """Monthly credits: the live plan's, staff/demo the base, nobody else any."""
 
-    def _allowance(self, tier):
-        return tiers.TIER_ALLOWANCES.get(
-            tiers.normalise(tier), tiers.TIER_ALLOWANCES[tiers.BASE_TIER]
-        )
+    def _allowance(self, tier, account_type=None):
+        return tiers.monthly_allowance(tier, account_type)
 
     def test_allowances_per_tier(self):
         self.assertEqual(self._allowance("operational"), 1500)
@@ -90,9 +88,18 @@ class CreditAllowanceUnaffected(unittest.TestCase):
         self.assertEqual(self._allowance("pro"), 6500)
         self.assertEqual(self._allowance("enterprise"), 90000)
 
-    def test_accounts_with_no_plan_keep_the_base_allowance(self):
-        for value in (None, "", "free"):
-            self.assertEqual(self._allowance(value), 1500)
+    def test_accounts_with_no_plan_get_no_monthly_credits(self):
+        for value in (None, "", "free", "snapshot", "blueprint", "nonsense"):
+            self.assertEqual(self._allowance(value), 0)
+            self.assertEqual(self._allowance(value, "paid"), 0)
+            self.assertEqual(self._allowance(value, "partner"), 0)
+
+    def test_staff_and_demo_without_a_plan_keep_the_base_allowance(self):
+        for account_type in ("admin", "employee", "demo", " Demo "):
+            self.assertEqual(self._allowance("free", account_type), 1500)
+
+    def test_a_live_plan_wins_over_the_account_type(self):
+        self.assertEqual(self._allowance("business", "demo"), 6500)
 
 
 class Display(unittest.TestCase):
