@@ -2,10 +2,11 @@
 Authentication service — PostgreSQL-backed (with JSON fallback).
 
 Users and sessions are stored in PostgreSQL when DATABASE_URL is set.
-Diagnostics, snapshots, blueprints, and payments remain in JSON files
-(unchanged from the original implementation).
+What an account has paid for is read from Postgres (`identity.user_tiers`)
+through `app/services/access.py`.
 """
 
+import logging
 import os
 import bcrypt
 import jwt
@@ -63,6 +64,9 @@ def _refresh_ttl_days() -> int:
 
 
 REFRESH_TOKEN_EXPIRE_DAYS = _refresh_ttl_days()
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -138,94 +142,77 @@ class AuthService:
         payload = self._decode(token)
         return payload if payload and is_refresh_payload(payload) else None
 
-    # ── Tier helpers (unchanged logic) ───────────────────────────────────────
+    # ── Tier helpers ──────────────────────────────────────────────────────────
+
+    #: Display defaults before the credit ledger overrides them (unchanged).
+    _DEFAULT_CREDITS = {"blueprint": 100, "snapshot": 50, tiers.FREE_TIER: 10}
 
     def _compute_tier(self, user_id: str, account_type: str) -> dict:
-        """Return tier / credits info for a user, checking payments in JSON store."""
+        """
+        Tier / credits shown on the user object (login, refresh, /auth/me).
+
+        The rule lives in `app/services/access.py`. This used to scan the
+        legacy JSON payments/diagnostics/snapshots/blueprints stores on every
+        call before overlaying Postgres; those stores are empty since payments
+        moved to `identity.user_tiers`, so the scan only cost time.
+
+        This path is best-effort for DISPLAY: an unreadable entitlement table
+        shows `free` (a partner: Enterprise, so a blip doesn't look like a
+        downgrade). Gates must not rely on it; they call
+        `GET /api/v1/entitlements/access`, which answers 503 instead.
+        """
+        from app.services import access, entitlement_state
+
         if account_type == "superadmin":
             return dict(
                 tier="enterprise", is_subscribed=True,
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=2000, credits_max=2000,
             )
-        partner_tier = self._partner_live_tier(user_id) if account_type == "partner" else None
-        if partner_tier:
-            # Distributor partner: Enterprise for the free months the admin
-            # dashboard granted, then whatever plan the partner subscribes to
-            # once that lapses — both live in user_tiers. Read here because
-            # this legacy computation never consults user_tiers, and the
-            # dashboard's paid gates read the tier it returns. With no live
-            # plan the partner falls through like any unsubscribed account.
-            allowance = tiers.TIER_ALLOWANCES[partner_tier]
+
+        live = entitlement_state.get_entitlements(user_id)
+        if live is None:
+            logger.warning("Entitlements unreadable for %s; /auth/me shows the fallback tier", user_id)
+            state = access.decide(account_type)
+            if account_type == "partner":
+                state.update(tier="enterprise", subscription_tier="enterprise", is_subscribed=True)
+        else:
+            state = access.decide(account_type, row_tier=live.get("tier"), features=live.get("features") or [])
+
+        tier = state["tier"]
+        if account_type == "partner" and state["is_subscribed"]:
+            # Partners: everything on, credits = the plan's allowance (no ledger overlay).
+            allowance = tiers.TIER_ALLOWANCES[tier]
             return dict(
-                tier=partner_tier, is_subscribed=True,
+                tier=tier, is_subscribed=True,
                 has_diagnostic=True, has_snapshot=True, has_blueprint=True,
                 credits=allowance, credits_max=allowance,
             )
 
-        payments   = self.db.load_all_json("payments")
-        diagnostics = self.db.load_all_json("diagnostics")
-        snapshots   = self.db.load_all_json("snapshots")
-        blueprints  = self.db.load_all_json("blueprints")
-
-        up = [p for p in payments if p.get("user_id") == user_id and p.get("status") == "paid"]
-        bundle = any(p.get("product") == "ai_bundle"          for p in up)
-        has_snap_pay  = any(p.get("product") == "ai_snapshot" for p in up) or bundle
-        has_bp_pay    = any(p.get("product") == "ai_blueprint" for p in up) or bundle
-        has_sub_pay   = any(p.get("product") == "step3_subscription" for p in up)
-
-        has_diagnostic = any(d.get("user_id") == user_id for d in diagnostics)
-        has_snapshot   = any(s.get("user_id") == user_id for s in snapshots)
-        has_blueprint  = any(b.get("user_id") == user_id for b in blueprints)
-
-        if has_sub_pay:
-            return dict(tier="enterprise", is_subscribed=True,
-                        has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
-                        has_blueprint=has_blueprint, credits=2000, credits_max=2000)
-        if has_bp_pay:
-            return dict(tier="blueprint", is_subscribed=False,
-                        has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
-                        has_blueprint=has_blueprint, credits=100, credits_max=100)
-        if has_snap_pay:
-            return dict(tier="snapshot", is_subscribed=False,
-                        has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
-                        has_blueprint=has_blueprint, credits=50, credits_max=50)
-        return dict(tier="free", is_subscribed=False,
-                    has_diagnostic=has_diagnostic, has_snapshot=has_snapshot,
-                    has_blueprint=has_blueprint, credits=10, credits_max=10)
-
-    @staticmethod
-    def _partner_live_tier(user_id: str) -> Optional[str]:
-        """The partner's current plan: the free Enterprise period, a paid
-        subscription after it, or None once nothing is live.
-
-        An unreadable entitlement table (None) reports Enterprise: every
-        server-side gate re-reads user_tiers itself, so this only decides what
-        the dashboard shows, and a database blip should not make a partner's
-        dashboard look downgraded.
-        """
-        from app.services import entitlement_state
-
-        live = entitlement_state.get_entitlements(user_id)
-        if live is None:
-            return "enterprise"
-        tier = tiers.account_tier(live.get("tier"))
-        return None if tier == tiers.FREE_TIER else tier
+        features = set(state["features"])
+        default = tiers.TIER_ALLOWANCES.get(tier, self._DEFAULT_CREDITS.get(tier, 10))
+        info = dict(
+            tier=tier,
+            is_subscribed=state["is_subscribed"],
+            has_diagnostic="snapshot" in features,
+            has_snapshot="snapshot" in features,
+            has_blueprint="blueprint" in features,
+            credits=default,
+            credits_max=default,
+        )
+        if account_type != "partner" and live is not None:
+            credits = entitlement_state.get_credit_snapshot(user_id)
+            if credits and not credits.get("unlimited"):
+                if credits.get("balance") is not None:
+                    info["credits"] = int(credits["balance"])
+                if credits.get("allowance") is not None:
+                    info["credits_max"] = int(credits["allowance"])
+        return info
 
     def _build_user_response(self, user: dict) -> UserResponse:
         user_id      = user.get("user_id") or user.get("id")
         account_type = user.get("account_type", "free")
         tier_info    = self._compute_tier(user_id, account_type)
-        # Payments land in Postgres (user_tiers / user_credits), which the
-        # legacy computation above never reads, so a paying customer was
-        # reported as `free`. Overlay what is live. Superadmins are already
-        # Enterprise. Partners are resolved from user_tiers in _compute_tier;
-        # the overlay would also count their free-period snapshot/blueprint
-        # features as a paid `blueprint` tier after the period lapses.
-        if account_type not in ("superadmin", "partner"):
-            from app.services import entitlement_state
-
-            tier_info = entitlement_state.overlay(tier_info, user_id)
 
         created = user.get("created_at")
         if isinstance(created, str):
