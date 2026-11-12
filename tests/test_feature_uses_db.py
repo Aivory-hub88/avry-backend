@@ -135,6 +135,47 @@ class FeatureUses(unittest.TestCase):
         self.assertEqual(self.fu.status("lapsed_partner")["copilot"]["remaining"], 0)
         self.assertEqual(self.fu.status("demo1")["snapshot"]["remaining"], 0)
 
+    def test_copilot_trial_charges_on_first_good_turn_and_caps_turns(self):
+        # A turn that fails is never recorded: checking alone charges nothing.
+        self.fu.trial_check("newbie", "copilot", "copilot:s1")
+        self.fu.trial_check("newbie", "copilot", "copilot:s1")
+        self.assertEqual(self.fu.status("newbie")["copilot"]["remaining"], 1)
+        first = self.fu.trial_record("newbie", "copilot", "copilot:s1")
+        self.assertTrue(first["charged"])
+        self.assertEqual(first["turns_left"], self.fu.TRIAL_MAX_TURNS["copilot"] - 1)
+        # A second session has no use left.
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_check("newbie", "copilot", "copilot:s2")
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_record("newbie", "copilot", "copilot:s2")
+        # The paid-for session runs until its turns are used, kept in Postgres.
+        for _ in range(self.fu.TRIAL_MAX_TURNS["copilot"] - 1):
+            self.fu.trial_check("newbie", "copilot", "copilot:s1")
+            self.assertFalse(self.fu.trial_record("newbie", "copilot", "copilot:s1")["charged"])
+        with self.assertRaises(self.fu.TrialTurnsUsed):
+            self.fu.trial_check("newbie", "copilot", "copilot:s1")
+        with self.assertRaises(self.fu.TrialTurnsUsed):
+            self.fu.trial_record("newbie", "copilot", "copilot:s1")
+
+    def test_trial_session_of_someone_else_is_refused(self):
+        self.fu.trial_record("newbie", "copilot", "copilot:shared")
+        import psycopg2
+
+        conn = psycopg2.connect(DB)
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO identity.users (id, account_type) VALUES ('other','free')")
+        conn.commit()
+        conn.close()
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_check("other", "copilot", "copilot:shared")
+        with self.assertRaises(self.fu.NoUsesLeft):
+            self.fu.trial_record("other", "copilot", "copilot:shared")
+
+    def test_trial_is_free_for_unlimited_accounts_and_only_for_copilot(self):
+        self.assertTrue(self.fu.trial_record("boss", "copilot", "copilot:b")["unlimited"])
+        with self.assertRaises(ValueError):
+            self.fu.trial_check("newbie", "snapshot", "x")
+
     def test_an_old_two_feature_table_is_widened_for_copilot(self):
         import psycopg2
 
