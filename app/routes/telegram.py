@@ -15,6 +15,9 @@ Telegram-facing:
 import asyncio
 import json
 import logging
+import os
+import re
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Header, Depends, Request
@@ -292,6 +295,65 @@ def discussion_turn(body: DiscussionTurnRequest, user: dict = Depends(get_curren
 @router.post("/discussion-turn")
 async def discussion_turn_route(body: DiscussionTurnRequest, user: dict = Depends(get_current_user_payload)):
     return await _run_with_keepalive(lambda: discussion_turn(body, user))
+
+
+# --- Unattended agent turn for a tenant (server-to-server) -----------------------------
+# The dashboard's WhatsApp CRM asks the *customer's own* agent to draft a reply when a
+# customer message arrives. There is no signed-in user at that moment, so this endpoint is
+# authenticated by a dedicated shared secret (DASHBOARD_AGENT_TURN_TOKEN) rather than a JWT.
+# It deliberately has its own secret instead of reusing TELEGRAM_GATEWAY_TOKEN: the dashboard
+# only needs to run turns, not to call every bridge-facing internal route.
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def require_agent_turn_token(x_agent_turn_token: Optional[str] = Header(None)) -> None:
+    expected = os.getenv("DASHBOARD_AGENT_TURN_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Agent turn token not configured")
+    if not x_agent_turn_token or not secrets.compare_digest(x_agent_turn_token, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+class InternalAgentTurnRequest(BaseModel):
+    tenant_user_id: str = Field(min_length=1, max_length=128)
+    agent_type: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=12000)
+    # One conversation per customer contact keeps the agent's session memory separate.
+    conversation_id: Optional[str] = Field(default=None, max_length=128)
+
+
+def internal_agent_turn(body: InternalAgentTurnRequest):
+    """Run one turn of a tenant's agent and return its reply (same engine as the console)."""
+    if body.agent_type not in AGENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unknown agent_type '{body.agent_type}'")
+    conversation_id = (body.conversation_id or "").strip() or None
+    if conversation_id and not _CONVERSATION_ID_RE.match(conversation_id):
+        raise HTTPException(status_code=400, detail="Invalid conversation_id")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    record = telegram_service._load_user(body.tenant_user_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    # Same plan gate as the console: a tenant can only run agents their tier includes.
+    tier_err = agent_tier_error(record, body.agent_type)
+    if tier_err:
+        raise HTTPException(status_code=403, detail=tier_err)
+
+    result = telegram_service.route_console_message(record, body.agent_type, text[:8000], conversation_id)
+    return {
+        "reply": result["reply"],
+        "agent_type": body.agent_type,
+        "agent_name": AGENT_TYPES[body.agent_type],
+        "pending_approval": result.get("pending_approval"),
+    }
+
+
+@router.post("/internal/agent-turn", dependencies=[Depends(require_agent_turn_token)])
+async def internal_agent_turn_route(body: InternalAgentTurnRequest):
+    # A turn can run for minutes (tools); keep the connection alive like the console route.
+    return await _run_with_keepalive(lambda: internal_agent_turn(body))
 
 
 @router.get("/link-status/{token}")
