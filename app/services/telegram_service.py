@@ -324,6 +324,51 @@ def load_user_record(db, user_id: str) -> Optional[dict]:
     return user
 
 
+GROUP_CHAT_TYPES = ("group", "supergroup")
+
+
+def is_group_chat(chat: dict) -> bool:
+    return (chat or {}).get("type") in GROUP_CHAT_TYPES
+
+
+def sender_display_name(message: dict) -> str:
+    """Human-readable sender name for the agent prompt (single line, bounded)."""
+    sender = message.get("from") or {}
+    name = " ".join(p for p in (sender.get("first_name"), sender.get("last_name")) if p).strip()
+    name = name or sender.get("username") or sender.get("title") or "Unknown"
+    name = re.sub(r"[\[\]\r\n]+", " ", str(name)).strip()
+    return name[:64] or "Unknown"
+
+
+def addressed_to_bot(message: dict, bot: dict) -> bool:
+    """True when a group message is meant for this bot: an @mention, a reply
+    to one of its messages, or a command (plain or /cmd@ThisBot)."""
+    username = (bot.get("username") or "").lstrip("@").lower()
+    bot_id = str(bot.get("bot_id") or "")
+    text = message.get("text") or message.get("caption") or ""
+
+    reply_from = ((message.get("reply_to_message") or {}).get("from") or {})
+    if reply_from.get("id") is not None and str(reply_from["id"]) == bot_id:
+        return True
+
+    entities = (message.get("entities") or []) + (message.get("caption_entities") or [])
+    for ent in entities:
+        etype = ent.get("type")
+        if etype == "mention":
+            off, ln = ent.get("offset", 0), ent.get("length", 0)
+            if text[off:off + ln].lstrip("@").lower() == username:
+                return True
+        elif etype == "text_mention":
+            if str((ent.get("user") or {}).get("id")) == bot_id:
+                return True
+        elif etype == "bot_command" and ent.get("offset", 0) == 0:
+            cmd = text[: ent.get("length", 0)]
+            target = cmd.split("@", 1)[1].lower() if "@" in cmd else None
+            if target is None or target == username:
+                return True
+    return False
+
+
 def get_bot(agent_type: Optional[str]) -> Optional[dict]:
     """Resolve bot credentials for an agent type.
 
@@ -620,10 +665,26 @@ class TelegramService:
         if chat_id is None:
             return
 
+        # Group -> supergroup upgrade: Telegram changes the chat id and posts a
+        # service message (no text) in the old chat. Move the binding first.
+        if message.get("migrate_to_chat_id") is not None:
+            self._handle_migration(chat_id, message["migrate_to_chat_id"], chat, bot)
+            return
+        if message.get("migrate_from_chat_id") is not None:
+            self._handle_migration(message["migrate_from_chat_id"], chat_id, chat, bot)
+            return
+
+        # Never converse with other bots (bot-to-bot loops, relay spam).
+        if (message.get("from") or {}).get("is_bot"):
+            return
+
         text = (message.get("text") or "").strip()
         has_attachment = bool(message.get("document") or message.get("photo"))
         if not text and not has_attachment:
             return  # stickers, location, etc. — nothing to act on
+
+        if is_group_chat(chat) and not addressed_to_bot(message, bot):
+            return  # in groups the bot only answers when addressed
 
         if text.startswith("/start"):
             self._handle_start(chat, text, bot)
@@ -632,6 +693,48 @@ class TelegramService:
             self._handle_stop(chat_id, bot)
         else:
             self._handle_message(chat_id, message, bot)
+
+    def _handle_migration(self, old_chat_id: int, new_chat_id: int, chat: dict, bot: dict) -> None:
+        """Move a binding from a basic group's id to its supergroup id.
+
+        Idempotent: Telegram sends both migrate_to (old chat) and migrate_from
+        (new chat); whichever arrives second finds nothing left to move.
+        """
+        old_id = self._binding_id(bot, old_chat_id)
+        new_id = self._binding_id(bot, new_chat_id)
+        binding = self.db.load_json(BINDINGS_COLLECTION, old_id)
+        if not binding:
+            return
+        if self.db.load_json(BINDINGS_COLLECTION, new_id):
+            # Already bound at the new id (e.g. re-linked); drop the stale one.
+            self.db.delete_json(BINDINGS_COLLECTION, old_id)
+            return
+        migrated = dict(binding)
+        migrated["binding_id"] = new_id
+        migrated["chat_id"] = new_chat_id
+        migrated["chat_type"] = "supergroup"
+        # Keep the agent's session history: the session id was the old binding id.
+        migrated["session_id"] = binding.get("session_id") or old_id
+        migrated["migrated_from"] = old_chat_id
+        self.db.save_json(BINDINGS_COLLECTION, new_id, migrated)
+        self.db.delete_json(BINDINGS_COLLECTION, old_id)
+
+        # A waiting approval is keyed by binding id.
+        try:
+            pending = self.db.load_json(PENDING_COLLECTION, old_id)
+            if pending:
+                self.db.save_json(PENDING_COLLECTION, new_id, pending)
+                self.db.delete_json(PENDING_COLLECTION, old_id)
+        except Exception as e:
+            logger.error(f"pending-approval migration failed: {e}")
+        # Team channel membership is keyed by binding id too (best effort).
+        try:
+            from app.services import teams
+
+            teams.rename_channel_ref(binding["user_id"], "telegram", old_id, new_id)
+        except Exception as e:
+            logger.warning(f"team channel migration skipped: {e}")
+        logger.info(f"Migrated Telegram binding {old_id} -> {new_id} (supergroup upgrade)")
 
     def _handle_start(self, chat: dict, text: str, bot: dict) -> None:
         chat_id = chat["id"]
@@ -924,6 +1027,9 @@ class TelegramService:
         prompt = self._build_prompt(bot, message)
         if not prompt:
             return  # nothing readable (e.g. unsupported file with no caption)
+        if is_group_chat(message.get("chat") or {}):
+            # Several people share one session in a group: say who is talking.
+            prompt = f"[{sender_display_name(message)}]: {prompt}"
         result = self._remember_pending_result(binding, self._route_to_agent(binding, prompt))
         self.send_message(bot, chat_id, result["reply"])
 
@@ -1024,6 +1130,7 @@ class TelegramService:
                 # pseudo-bindings carry room_session_id); everywhere else
                 # the binding stays the session so histories never merge.
                 "session_id": binding.get("room_session_id")
+                or binding.get("session_id")
                 or binding.get("binding_id")
                 or str(binding["chat_id"]),
                 "text": text,
