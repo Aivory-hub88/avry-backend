@@ -264,6 +264,25 @@ def detach_channel(user_id: str, team_id: str, kind: str, ref: str) -> Optional[
     return get_team(user_id, team_id)
 
 
+def rename_channel_ref(user_id: str, kind: str, old_ref: str, new_ref: str) -> bool:
+    """Re-point a channel's ref (e.g. a Telegram group's binding id after it
+    becomes a supergroup). Returns True when a row was moved."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product.team_channels SET ref = %s"
+                " WHERE user_id = %s AND kind = %s AND ref = %s",
+                (new_ref, user_id, kind, old_ref),
+            )
+            moved = cur.rowcount > 0
+        conn.commit()
+    finally:
+        conn.close()
+    return moved
+
+
 def team_for_channel(user_id: str, kind: str, ref: str) -> Optional[dict]:
     conn = _connect()
     try:
