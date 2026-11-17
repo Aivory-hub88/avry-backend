@@ -23,6 +23,9 @@ AGENTS=(
   "finance_invoice_ops|Aivory Finance & Invoice Ops — precise invoice automation. Just type.|Your Aivory Finance & Invoice Ops Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
   "office_assistant|Aivory Office Assistant — summaries and action items. Just type.|Your Aivory Office Assistant lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
   "chief_of_staff|Aivory Chief of Staff — coordinates your AI team. Just type.|Your Aivory Chief of Staff lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
+  "data_analyst|Aivory Data & Reporting Analyst — numbers into answers. Just type.|Your Aivory Data & Reporting Analyst lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
+  "operations_inventory|Aivory Operations & Inventory Agent — keeps stock and ops moving. Just type.|Your Aivory Operations & Inventory Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
+  "marketing_content|Aivory Marketing & Content Agent — campaigns and copy. Just type.|Your Aivory Marketing & Content Agent lives here. Deploy it from your Aivory dashboard, scan the QR code, and just start typing — no commands, no menus."
 )
 
 setup_bot() {
