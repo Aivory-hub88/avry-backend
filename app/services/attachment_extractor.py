@@ -31,6 +31,12 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024           # vision payloads stay small
 VISION_MODEL = os.getenv("VISION_MODEL", "google/gemini-2.5-flash")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Speech-to-text for voice notes (Groq's OpenAI-compatible Whisper endpoint)
+STT_MODEL = os.getenv("STT_MODEL", "whisper-large-v3-turbo")
+STT_URL = os.getenv("STT_URL", "https://api.groq.com/openai/v1/audio/transcriptions")
+MAX_AUDIO_BYTES = 20 * 1024 * 1024          # under Groq's 25 MB upload cap
+MAX_AUDIO_SECONDS = 600                      # 10 min; a voice note, not a recording
+
 _TEXT_EXTS = {".txt", ".md", ".log", ".json", ".yaml", ".yml", ".text"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 
@@ -194,20 +200,65 @@ def describe_image(data: bytes, mime: str, user_caption: str = "") -> Optional[s
 
 
 # ============================================================================
+# VOICE NOTES (speech-to-text)
+# ============================================================================
+
+def transcribe_audio(
+    data: bytes,
+    filename: str = "voice.ogg",
+    mime: Optional[str] = None,
+    duration: Optional[int] = None,
+) -> Optional[str]:
+    """Transcribe a voice note. Returns the transcript, a bracketed note for
+    audio we refuse to send (too long/large), or None if it could not be done.
+
+    Language is left to auto-detect: users mix Indonesian and English."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        logger.warning("GROQ_API_KEY not set; cannot transcribe voice note")
+        return None
+    if len(data) > MAX_AUDIO_BYTES or (duration and duration > MAX_AUDIO_SECONDS):
+        return "[This voice note is too long to transcribe.]"
+
+    try:
+        resp = requests.post(
+            STT_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (filename or "voice.ogg", data, mime or "audio/ogg")},
+            data={"model": STT_MODEL, "response_format": "json"},
+            timeout=30,
+        )
+        if resp.ok:
+            text = (resp.json().get("text") or "").strip()
+            return _truncate(text) if text else None
+        logger.error(f"STT {resp.status_code}: {resp.text[:200]}")
+    except (requests.RequestException, ValueError) as e:
+        logger.error(f"STT request failed: {e}")
+    return None
+
+
+# ============================================================================
 # COMPOSE — build the final prompt text handed to the agent gateway
 # ============================================================================
 
 def compose_prompt(user_text: str, attachments: list) -> str:
     """Combine the user's typed text with extracted attachment content.
 
-    attachments: list of {"filename": str, "content": str, "kind": "document"|"image"}
+    attachments: list of {"filename": str, "content": str,
+                          "kind": "document"|"image"|"voice"}
     """
     blocks = []
+    has_voice = False
     for att in attachments:
         content = (att.get("content") or "").strip()
         if not content:
             continue
-        label = "Image" if att.get("kind") == "image" else "Document"
+        kind = att.get("kind")
+        if kind == "voice":
+            has_voice = True
+            blocks.append(f"[Voice note transcript]\n{content}")
+            continue
+        label = "Image" if kind == "image" else "Document"
         name = att.get("filename") or "attachment"
         blocks.append(f"[{label}: {name}]\n{content}")
 
@@ -216,7 +267,14 @@ def compose_prompt(user_text: str, attachments: list) -> str:
         return user_text
 
     joined = "\n\n".join(blocks)
+    tail = ""
+    if has_voice:
+        # Transcription can mishear names and numbers; let the user correct it.
+        tail = (
+            "\n\n[The user spoke this as a voice note. Start your reply with one short "
+            "line saying what you heard, in the user's language, so they can correct it.]"
+        )
     if user_text:
-        return f"{joined}\n\n[User's message]\n{user_text}"
+        return f"{joined}\n\n[User's message]\n{user_text}{tail}"
     # No caption: tell the agent the user sent the file with no words
-    return f"{joined}\n\n[The user sent this without any message. Respond helpfully based on its content.]"
+    return f"{joined}\n\n[The user sent this without any message. Respond helpfully based on its content.]{tail}"
