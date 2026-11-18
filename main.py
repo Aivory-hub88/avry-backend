@@ -205,6 +205,13 @@ except Exception as e:
     print(f"[!] Telegram routes failed: {e}")
 
 try:
+    from app.routes.whatsapp import router as whatsapp_router
+    app.include_router(whatsapp_router)
+    print("[OK] WhatsApp routes registered")
+except Exception as e:
+    print(f"[!] WhatsApp routes failed: {e}")
+
+try:
     from app.routes.discord import router as discord_router
     app.include_router(discord_router)
     print("[OK] Discord routes registered")
