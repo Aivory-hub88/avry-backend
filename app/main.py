@@ -65,6 +65,13 @@ except Exception as e:
     telegram_router = None
 
 try:
+    from app.routes.whatsapp import router as whatsapp_router
+    print("[✓] WhatsApp routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import whatsapp routes: {e}")
+    whatsapp_router = None
+
+try:
     from app.routes.slack import router as slack_router
     print("[✓] Slack routes registered")
 except Exception as e:
@@ -251,6 +258,8 @@ if admin_users_router:
 
 if telegram_router:
     app.include_router(telegram_router)
+if whatsapp_router:
+    app.include_router(whatsapp_router)
 if slack_router:
     app.include_router(slack_router)
 if agent_actions_router:
