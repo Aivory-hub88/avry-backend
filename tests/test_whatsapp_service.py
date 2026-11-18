@@ -194,6 +194,50 @@ class InboundTest(unittest.TestCase):
         self.assertIn("could not be transcribed", prompt)
 
 
+class MediaDownloadTest(unittest.TestCase):
+    ENV = {"KAPSO_API_KEY": "k", "KAPSO_PHONE_NUMBER_ID": "pn1"}
+
+    @staticmethod
+    def resp(ok=True, json_body=None, content=b""):
+        r = mock.Mock()
+        r.ok = ok
+        r.status_code = 200 if ok else 404
+        r.json.return_value = json_body or {}
+        r.content = content
+        return r
+
+    def test_looks_up_with_phone_number_id_and_uses_the_keyless_download_url(self):
+        svc = make_service()
+        lookup = self.resp(json_body={"download_url": "https://api.kapso.ai/meta/whatsapp/media_download?token=t", "url": "https://lookaside.fbsbx.com/x", "file_size": "3"})
+        blob = self.resp(content=b"ogg")
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(ws.requests, "get", side_effect=[lookup, blob]) as get:
+            self.assertEqual(svc.download_media("mid1"), b"ogg")
+        self.assertEqual(get.call_args_list[0].kwargs["params"], {"phone_number_id": "pn1"})
+        self.assertIsNone(get.call_args_list[1].kwargs["headers"])  # download_url carries its own token
+
+    def test_falls_back_to_the_meta_url_with_the_api_key(self):
+        svc = make_service()
+        lookup = self.resp(json_body={"download_url": "https://api.kapso.ai/d?token=t", "url": "https://lookaside.fbsbx.com/x"})
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(
+            ws.requests, "get", side_effect=[lookup, self.resp(ok=False), self.resp(content=b"img")]
+        ) as get:
+            self.assertEqual(svc.download_media("mid1"), b"img")
+        self.assertEqual(get.call_args_list[2].kwargs["headers"]["x-api-key"], "k")
+
+    def test_refuses_oversized_media_and_bad_ids(self):
+        svc = make_service()
+        big = self.resp(json_body={"download_url": "https://x/d", "file_size": str(ws.MAX_MEDIA_BYTES + 1)})
+        with mock.patch.dict("os.environ", self.ENV), mock.patch.object(ws.requests, "get", return_value=big) as get:
+            self.assertIsNone(svc.download_media("mid1"))
+            self.assertEqual(get.call_count, 1)
+            self.assertIsNone(svc.download_media("../etc/passwd"))
+
+    def test_missing_kapso_config_is_none_not_a_crash(self):
+        svc = make_service()
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(svc.download_media("mid1"))
+
+
 class WindowTest(unittest.TestCase):
     def test_proactive_send_only_inside_24h_window(self):
         svc = make_service()
