@@ -44,6 +44,7 @@ WINDOW_HOURS = 24
 MAX_TEXT = 4096
 DEDUPE_TTL_SECONDS = 48 * 3600
 DEDUPE_MAX = 20000
+MAX_MEDIA_BYTES = 20 * 1024 * 1024  # same ceiling as transcribe_audio()
 
 # Unambiguous alphabet (no 0/O/1/I/L) so a code typed from a QR screen is hard to get wrong.
 _ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
@@ -324,20 +325,39 @@ class WhatsAppService:
         return self.send_text(binding["wa_id"], text)
 
     def download_media(self, media_id: str) -> Optional[bytes]:
-        """media_id -> URL -> bytes (Graph-style two-step, through Kapso's Meta proxy)."""
+        """media_id -> download_url -> bytes, through Kapso's Meta proxy.
+
+        Per Kapso's docs the lookup needs `phone_number_id` as a query param, and the response
+        carries a Kapso-hosted `download_url` (valid ~4 min) that needs no auth header. The raw
+        Meta `url` (lookaside.fbsbx.com) is only a fallback.
+        """
         if not re.match(r"^[A-Za-z0-9_-]{1,128}$", media_id or ""):
             return None
         try:
             headers = self._kapso_headers()
-            meta = requests.get(f"{KAPSO_META}/{media_id}", headers=headers, timeout=15)
+            meta = requests.get(
+                f"{KAPSO_META}/{media_id}",
+                headers=headers,
+                params={"phone_number_id": self._phone_number_id()},
+                timeout=15,
+            )
             if not meta.ok:
                 logger.error("Kapso media lookup failed %s", meta.status_code)
                 return None
-            url = (meta.json() or {}).get("url")
-            if not url or not str(url).startswith("https://"):
+            info = meta.json() or {}
+            size = int(info.get("file_size") or 0)
+            if size > MAX_MEDIA_BYTES:
+                logger.warning("WhatsApp media too large (%s bytes), skipping", size)
                 return None
-            blob = requests.get(url, headers=headers, timeout=30)
-            return blob.content if blob.ok else None
+            for key, auth in (("download_url", False), ("url", True)):
+                url = info.get(key)
+                if not url or not str(url).startswith("https://"):
+                    continue
+                blob = requests.get(url, headers=headers if auth else None, timeout=30)
+                if blob.ok and len(blob.content) <= MAX_MEDIA_BYTES:
+                    return blob.content
+                logger.error("Kapso media download via %s failed %s", key, blob.status_code)
+            return None
         except (requests.RequestException, RuntimeError, ValueError) as e:
             logger.error("WhatsApp media download failed: %s", e)
             return None
