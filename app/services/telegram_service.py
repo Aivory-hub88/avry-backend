@@ -679,7 +679,12 @@ class TelegramService:
             return
 
         text = (message.get("text") or "").strip()
-        has_attachment = bool(message.get("document") or message.get("photo"))
+        has_attachment = bool(
+            message.get("document")
+            or message.get("photo")
+            or message.get("voice")
+            or message.get("audio")
+        )
         if not text and not has_attachment:
             return  # stickers, location, etc. — nothing to act on
 
@@ -1017,7 +1022,13 @@ class TelegramService:
         raw_text = (message.get("text") or message.get("caption") or "").strip()
         # Protocol first: a short "Ya"/"Batal" while an approval waits IS the
         # decision — no LLM roundtrip, no buttons to tap.
-        if raw_text and not message.get("document") and not message.get("photo"):
+        if (
+            raw_text
+            and not message.get("document")
+            and not message.get("photo")
+            and not message.get("voice")
+            and not message.get("audio")
+        ):
             handled = self._try_conversational_approval(binding, raw_text)
             if handled is not None:
                 self.send_message(bot, chat_id, handled["reply"])
@@ -1086,6 +1097,27 @@ class TelegramService:
             if data:
                 content = ax.describe_image(data, "image/jpeg", caption)
                 attachments.append({"filename": "photo.jpg", "content": content, "kind": "image"})
+
+        # Voice notes ("voice") and audio files ("audio") -> transcript
+        voice = message.get("voice") or message.get("audio")
+        if voice and voice.get("file_id"):
+            duration = voice.get("duration")
+            too_long = bool(duration and duration > ax.MAX_AUDIO_SECONDS)
+            data = None if too_long else self._download_file(bot, voice["file_id"])
+            if too_long:
+                transcript = "[This voice note is too long to transcribe.]"
+            elif data:
+                transcript = ax.transcribe_audio(
+                    data,
+                    voice.get("file_name") or "voice.ogg",
+                    voice.get("mime_type"),
+                    duration,
+                )
+            else:
+                transcript = None
+            if transcript is None:
+                transcript = "[The user sent a voice note but it could not be transcribed.]"
+            attachments.append({"filename": "voice", "content": transcript, "kind": "voice"})
 
         return ax.compose_prompt(caption, attachments)
 
