@@ -155,6 +155,13 @@ except Exception as e:
     print(f"[!] Warning: Could not import MCP image download routes: {e}")
     mcp_image_downloads_router = None
 
+try:
+    from app.routes.transcribe import router as transcribe_router
+    print("[✓] Transcribe routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import transcribe routes: {e}")
+    transcribe_router = None
+
 # Import event system (Phase 2)
 try:
     from app.events.consumer import start_consumer_background
@@ -284,6 +291,8 @@ if assessment_leads_router:
     app.include_router(assessment_leads_router)
 if mcp_image_downloads_router:
     app.include_router(mcp_image_downloads_router)
+if transcribe_router:
+    app.include_router(transcribe_router)
 
 # ===== HEALTH CHECK =====
 @app.get("/health")

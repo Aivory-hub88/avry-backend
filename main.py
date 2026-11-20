@@ -240,6 +240,13 @@ except Exception as e:
     print(f"[!] MCP image download routes failed: {e}")
 
 try:
+    from app.routes.transcribe import router as transcribe_router
+    app.include_router(transcribe_router)
+    print("[OK] Transcribe routes registered")
+except Exception as e:
+    print(f"[!] Transcribe routes failed: {e}")
+
+try:
     from app.routes.agent_roster import router as agent_roster_router
     app.include_router(agent_roster_router)
     print("[OK] Agent roster routes registered")
