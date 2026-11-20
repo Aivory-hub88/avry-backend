@@ -208,11 +208,15 @@ def transcribe_audio(
     filename: str = "voice.ogg",
     mime: Optional[str] = None,
     duration: Optional[int] = None,
+    language: Optional[str] = None,
+    prompt: Optional[str] = None,
 ) -> Optional[str]:
     """Transcribe a voice note. Returns the transcript, a bracketed note for
     audio we refuse to send (too long/large), or None if it could not be done.
 
-    Language is left to auto-detect: users mix Indonesian and English."""
+    Language auto-detects unless `language` (ISO-639-1) is given; short clips
+    are often misdetected, so interactive callers should pass a hint. `prompt`
+    biases vocabulary/style (useful for mixed Indonesian/English)."""
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         logger.warning("GROQ_API_KEY not set; cannot transcribe voice note")
@@ -225,7 +229,12 @@ def transcribe_audio(
             STT_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": (filename or "voice.ogg", data, mime or "audio/ogg")},
-            data={"model": STT_MODEL, "response_format": "json"},
+            data={
+                "model": STT_MODEL,
+                "response_format": "json",
+                **({"language": language} if language else {}),
+                **({"prompt": prompt} if prompt else {}),
+            },
             timeout=30,
         )
         if resp.ok:

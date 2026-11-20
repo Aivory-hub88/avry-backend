@@ -38,6 +38,8 @@ class TranscribeRouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"text": "halo dunia"})
         self.assertEqual(m.call_args.args[2], "audio/webm")  # codecs suffix stripped
+        self.assertEqual(m.call_args.kwargs["language"], "id")  # hint beats misdetection
+        self.assertTrue(m.call_args.kwargs["prompt"])
 
     def test_requires_auth(self):
         r = _post(_client(authed=False))
