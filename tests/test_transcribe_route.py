@@ -38,7 +38,8 @@ class TranscribeRouteTests(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"text": "halo dunia"})
         self.assertEqual(m.call_args.args[2], "audio/webm")  # codecs suffix stripped
-        self.assertEqual(m.call_args.kwargs["language"], "id")  # hint beats misdetection
+        self.assertIsNone(m.call_args.kwargs.get("language"))  # no forced language
+        self.assertEqual(m.call_args.kwargs["fallback_language"], "id")
         self.assertTrue(m.call_args.kwargs["prompt"])
 
     def test_requires_auth(self):
@@ -68,6 +69,53 @@ class TranscribeRouteTests(unittest.TestCase):
              patch.object(tr, "check_rate_limit", return_value=True):
             r = _post(_client())
         self.assertEqual(r.status_code, 502)
+
+
+class LanguageGuardTests(unittest.TestCase):
+    """transcribe_audio(fallback_language=...): flexible detect, retry only on odd languages."""
+
+    def _run(self, detected_then):
+        from app.services import attachment_extractor as ax
+
+        calls = []
+
+        def fake(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False):
+            calls.append({"language": language, "verbose": verbose})
+            return detected_then[len(calls) - 1]
+
+        with patch.dict("os.environ", {"GROQ_API_KEY": "k"}), \
+             patch.object(ax, "_stt_call", side_effect=fake):
+            out = ax.transcribe_audio(b"x", fallback_language="id")
+        return out, calls
+
+    def test_english_is_kept_without_retry(self):
+        out, calls = self._run([("send the report", "english")])
+        self.assertEqual(out, "send the report")
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["language"])
+        self.assertTrue(calls[0]["verbose"])
+
+    def test_indonesian_is_kept_without_retry(self):
+        out, calls = self._run([("terima kasih", "indonesian")])
+        self.assertEqual(out, "terima kasih")
+        self.assertEqual(len(calls), 1)
+
+    def test_odd_language_retries_with_fallback(self):
+        out, calls = self._run([("Hvala lengs.", "croatian"), ("terima kasih", "indonesian")])
+        self.assertEqual(out, "terima kasih")
+        self.assertEqual([c["language"] for c in calls], [None, "id"])
+
+    def test_empty_retry_keeps_first_text(self):
+        out, _ = self._run([("Hvala lengs.", "croatian"), ("", "indonesian")])
+        self.assertEqual(out, "Hvala lengs.")
+
+    def test_no_fallback_is_legacy_single_call(self):
+        from app.services import attachment_extractor as ax
+
+        with patch.dict("os.environ", {"GROQ_API_KEY": "k"}), \
+             patch.object(ax, "_stt_call", return_value=("hola", "")) as m:
+            self.assertEqual(ax.transcribe_audio(b"x"), "hola")
+        self.assertFalse(m.call_args.kwargs["verbose"])
 
 
 if __name__ == "__main__":

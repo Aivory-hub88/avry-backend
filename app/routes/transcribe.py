@@ -25,14 +25,15 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1", tags=["transcribe"])
 
-# Short dictation clips are frequently misdetected by Whisper's auto-detect
-# (e.g. Indonesian heard as Croatian), so default to Indonesian; English words
-# inside Indonesian speech are still transcribed. Set STT_CONSOLE_LANGUAGE to
-# "" to go back to auto-detect.
-_LANGUAGE = os.getenv("STT_CONSOLE_LANGUAGE", "id") or None
+# Language is auto-detected so users can speak Indonesian, English or a mix,
+# regardless of the UI language toggle. Short clips are sometimes misdetected
+# (Indonesian heard as Croatian), so if Whisper reports a language outside the
+# expected set the clip is re-run once with the fallback language.
+# STT_CONSOLE_FALLBACK_LANGUAGE="" disables the retry (pure auto-detect).
+_FALLBACK_LANGUAGE = os.getenv("STT_CONSOLE_FALLBACK_LANGUAGE", "id") or None
 _PROMPT = os.getenv(
     "STT_CONSOLE_PROMPT",
-    "Percakapan campuran Bahasa Indonesia dan English dengan agent AI di Aivory: "
+    "Indonesian or English conversation with AI agents in Aivory: "
     "workflow, lead, CRM, pipeline, Aira, Lex.",
 )
 
@@ -72,7 +73,11 @@ async def transcribe(
 
     mime: Optional[str] = (file.content_type or "").split(";")[0] or None
     text = ax.transcribe_audio(
-        data, file.filename or "voice.webm", mime, language=_LANGUAGE, prompt=_PROMPT
+        data,
+        file.filename or "voice.webm",
+        mime,
+        prompt=_PROMPT,
+        fallback_language=_FALLBACK_LANGUAGE,
     )
     if text is None:
         raise HTTPException(status_code=502, detail="Transcription failed")
