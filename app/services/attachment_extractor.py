@@ -203,27 +203,10 @@ def describe_image(data: bytes, mime: str, user_caption: str = "") -> Optional[s
 # VOICE NOTES (speech-to-text)
 # ============================================================================
 
-def transcribe_audio(
-    data: bytes,
-    filename: str = "voice.ogg",
-    mime: Optional[str] = None,
-    duration: Optional[int] = None,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
-) -> Optional[str]:
-    """Transcribe a voice note. Returns the transcript, a bracketed note for
-    audio we refuse to send (too long/large), or None if it could not be done.
-
-    Language auto-detects unless `language` (ISO-639-1) is given; short clips
-    are often misdetected, so interactive callers should pass a hint. `prompt`
-    biases vocabulary/style (useful for mixed Indonesian/English)."""
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        logger.warning("GROQ_API_KEY not set; cannot transcribe voice note")
-        return None
-    if len(data) > MAX_AUDIO_BYTES or (duration and duration > MAX_AUDIO_SECONDS):
-        return "[This voice note is too long to transcribe.]"
-
+def _stt_call(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False):
+    """One Groq Whisper request. Returns (text, detected_language) or None on
+    failure. detected_language is Whisper's lowercase English name (e.g.
+    "indonesian") and is only available with verbose=True."""
     try:
         resp = requests.post(
             STT_URL,
@@ -231,19 +214,64 @@ def transcribe_audio(
             files={"file": (filename or "voice.ogg", data, mime or "audio/ogg")},
             data={
                 "model": STT_MODEL,
-                "response_format": "json",
+                "response_format": "verbose_json" if verbose else "json",
                 **({"language": language} if language else {}),
                 **({"prompt": prompt} if prompt else {}),
             },
             timeout=30,
         )
         if resp.ok:
-            text = (resp.json().get("text") or "").strip()
-            return _truncate(text) if text else None
+            body = resp.json()
+            return (body.get("text") or "").strip(), (body.get("language") or "").strip().lower()
         logger.error(f"STT {resp.status_code}: {resp.text[:200]}")
     except (requests.RequestException, ValueError) as e:
         logger.error(f"STT request failed: {e}")
     return None
+
+
+def transcribe_audio(
+    data: bytes,
+    filename: str = "voice.ogg",
+    mime: Optional[str] = None,
+    duration: Optional[int] = None,
+    language: Optional[str] = None,
+    prompt: Optional[str] = None,
+    fallback_language: Optional[str] = None,
+    expected_languages: tuple = ("indonesian", "english", "malay"),
+) -> Optional[str]:
+    """Transcribe a voice note. Returns the transcript, a bracketed note for
+    audio we refuse to send (too long/large), or None if it could not be done.
+
+    Language auto-detects by default (users mix Indonesian and English). Pass
+    `language` (ISO-639-1) to force one. Pass `fallback_language` to keep
+    auto-detect but guard against misdetection on short clips: if Whisper's
+    detected language isn't in `expected_languages` (e.g. Indonesian heard as
+    Croatian), the clip is re-run once with `fallback_language`. `prompt`
+    biases vocabulary/style."""
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        logger.warning("GROQ_API_KEY not set; cannot transcribe voice note")
+        return None
+    if len(data) > MAX_AUDIO_BYTES or (duration and duration > MAX_AUDIO_SECONDS):
+        return "[This voice note is too long to transcribe.]"
+
+    guard = bool(fallback_language) and not language
+    first = _stt_call(
+        api_key, data, filename, mime, language=language, prompt=prompt, verbose=guard
+    )
+    if first is None:
+        return None
+    text, detected = first
+
+    if guard and detected and detected not in expected_languages:
+        logger.info(f"STT detected '{detected}'; retrying with '{fallback_language}'")
+        retry = _stt_call(
+            api_key, data, filename, mime, language=fallback_language, prompt=prompt
+        )
+        if retry and retry[0]:
+            text = retry[0]
+
+    return _truncate(text) if text else None
 
 
 # ============================================================================
