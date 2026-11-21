@@ -311,6 +311,24 @@ class ApiMessageRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, max_length=200)
 
 
+@router.get("/agent-api/ping")
+def api_ping(x_aivory_api_key: str = Header(default="")):
+    """Credential check for integrations (e.g. the n8n community node's
+    "Test" button). Validates the key and the account tier exactly like
+    /agent-api/message, but never reaches the agent gateway, so it costs no
+    credits and runs no LLM."""
+    key_info = _resolve_api_key(x_aivory_api_key)
+    if not key_info:
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+    user = load_user_record(_db_service, key_info["user_id"])
+    if not user or not _tier_ok(user):
+        raise HTTPException(
+            status_code=403,
+            detail="API deployment requires the Pro plan or above; this account no longer qualifies.",
+        )
+    return {"ok": True, "agent_type": key_info["agent_type"]}
+
+
 @router.post("/agent-api/message")
 def api_message(
     body: ApiMessageRequest,
