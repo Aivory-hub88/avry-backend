@@ -28,7 +28,8 @@ router = APIRouter(prefix="/api/v1", tags=["agent-roster"])
 # Matches AGENT_DISPLAY_NAMES in frontend/avry-user-dashboard/lib/workspaceAccess.ts.
 # Keep in sync manually until that follow-up lands.
 AGENT_ROSTER = [
-    {"agent_type": "autonomous", "name": "Geno", "title": "Generalist Agent"},
+    # Geno was the Generalist Agent until ADR-025 D1 (2026-11): now a shared service, the task and follow-up keeper.
+    {"agent_type": "autonomous", "name": "Geno", "title": "Task & Follow-up Agent"},
     {"agent_type": "customer_service", "name": "Teo", "title": "Ticket Ops Agent"},
     {"agent_type": "leads_qualifier", "name": "Lex", "title": "Sales and Lead Agent"},
     {"agent_type": "finance_invoice_ops", "name": "Finn", "title": "Finance & Invoice Ops Agent"},

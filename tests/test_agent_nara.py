@@ -45,5 +45,15 @@ class NaraWiring(unittest.TestCase):
         self.assertEqual(_odoo_methods_for("deep_researcher"), [])
 
 
+class GenoRescope(unittest.TestCase):
+    """ADR-025 D1: Geno keeps agent_type and name, the title becomes task and follow-up keeper."""
+
+    def test_geno_title_and_identity(self):
+        entry = next(a for a in AGENT_ROSTER if a["agent_type"] == "autonomous")
+        self.assertEqual(entry["name"], "Geno")
+        self.assertEqual(entry["title"], "Task & Follow-up Agent")
+        self.assertEqual(AGENT_TYPES["autonomous"], "Task & Follow-up Agent")
+
+
 if __name__ == "__main__":
     unittest.main()
