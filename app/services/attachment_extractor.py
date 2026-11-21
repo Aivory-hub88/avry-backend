@@ -30,10 +30,10 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024           # vision payloads stay small
 # Vision model on OpenRouter (plain deepseek-v4-flash is text-only; v4.1-flash accepts images)
 VISION_MODEL = os.getenv("VISION_MODEL", "deepseek/deepseek-v4.1-flash")
 # Tried in order when the primary is rate-limited (429) or errors upstream, so an image
-# is not lost to one provider's bad minute. Different providers on purpose.
+# is not lost to one provider's bad minute. All DeepSeek: user images are not sent to other vendors.
 VISION_FALLBACK_MODELS = [
     m.strip()
-    for m in os.getenv("VISION_FALLBACK_MODELS", "google/gemini-2.5-flash,openai/gpt-4o-mini").split(",")
+    for m in os.getenv("VISION_FALLBACK_MODELS", "deepseek/deepseek-v4.1-flash-1017,deepseek/deepseek-v4-flash-vision-exp").split(",")
     if m.strip()
 ]
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
