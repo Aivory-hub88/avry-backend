@@ -52,6 +52,8 @@ AGENT_TYPES = {a["agent_type"]: a["title"] for a in AGENT_ROSTER}
 # every paid tier.
 AGENT_MIN_TIER = {
     "office_assistant": "enterprise",
+    # Nara: research is an enterprise need; Business ($99) and above.
+    "deep_researcher": "business",
 }
 
 
@@ -72,7 +74,7 @@ def agent_tier_error(user, agent_type: str):
     tier = tiers.account_tier((user or {}).get("tier"))
     if not tiers.meets(tier, required):
         name = AGENT_TYPES.get(agent_type, agent_type)
-        return f"{name} is available on the Enterprise plan. Upgrade to deploy it."
+        return f"{name} is available on the {str(required).capitalize()} plan and above. Upgrade to deploy it."
     return None
 
 # Prompt-only UX: no commands mentioned anywhere. Disconnecting is done from

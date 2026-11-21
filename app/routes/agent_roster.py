@@ -36,6 +36,9 @@ AGENT_ROSTER = [
     {"agent_type": "data_analyst", "name": "Ivo", "title": "Data & Reporting Analyst"},
     {"agent_type": "operations_inventory", "name": "Juno", "title": "Operations & Inventory Agent"},
     {"agent_type": "marketing_content", "name": "Mira", "title": "Marketing & Content Agent"},
+    # Nara (deep_researcher, 2026-11): read-only, source-cited research. Business tier and above
+    # (AGENT_MIN_TIER). ADR-025: a shared service, never delegates further.
+    {"agent_type": "deep_researcher", "name": "Nara", "title": "Research & Evidence Agent"},
     {"agent_type": "chief_of_staff", "name": "Aira", "title": "Chief of Staff Agent"},
 ]
 
