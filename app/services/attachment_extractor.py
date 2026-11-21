@@ -29,6 +29,13 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024           # vision payloads stay small
 
 # Vision model on OpenRouter (deepseek-v4-flash is text-only, so images need this)
 VISION_MODEL = os.getenv("VISION_MODEL", "google/gemini-2.5-flash")
+# Tried in order when the primary is rate-limited (429) or errors upstream, so an image
+# is not lost to one provider's bad minute. Different providers on purpose.
+VISION_FALLBACK_MODELS = [
+    m.strip()
+    for m in os.getenv("VISION_FALLBACK_MODELS", "openai/gpt-4o-mini,anthropic/claude-haiku-4.5").split(",")
+    if m.strip()
+]
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Speech-to-text for voice notes (Groq's OpenAI-compatible Whisper endpoint)
@@ -167,35 +174,41 @@ def describe_image(data: bytes, mime: str, user_caption: str = "") -> Optional[s
     if user_caption:
         prompt += f'\nThe user said: "{user_caption}"'
 
-    try:
-        resp = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://aivory.id",
-                "X-Title": "Aivory Agent Vision",
-            },
-            json={
-                "model": VISION_MODEL,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                        ],
-                    }
-                ],
-            },
-            timeout=60,
-        )
-        if resp.ok:
-            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content")
-            return _truncate(content) if content else None
-        logger.error(f"Vision model {resp.status_code}: {resp.text[:200]}")
-    except (requests.RequestException, ValueError) as e:
-        logger.error(f"Vision request failed: {e}")
+    for model in [VISION_MODEL, *[m for m in VISION_FALLBACK_MODELS if m != VISION_MODEL]]:
+        try:
+            resp = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://aivory.id",
+                    "X-Title": "Aivory Agent Vision",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                            ],
+                        }
+                    ],
+                },
+                timeout=60,
+            )
+            if resp.ok:
+                content = resp.json().get("choices", [{}])[0].get("message", {}).get("content")
+                if content:
+                    return _truncate(content)
+                logger.error(f"Vision model {model} returned no content")
+                continue
+            logger.error(f"Vision model {model} {resp.status_code}: {resp.text[:200]}")
+            if resp.status_code not in (408, 429, 500, 502, 503, 504):
+                break  # a bad request/key will fail the same way on every model
+        except (requests.RequestException, ValueError) as e:
+            logger.error(f"Vision request to {model} failed: {e}")
     return None
 
 
