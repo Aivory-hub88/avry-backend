@@ -219,6 +219,43 @@ async def agent_chat_route(body: AgentChatRequest, user: dict = Depends(get_curr
     return await _run_with_keepalive(lambda: agent_chat(body, user))
 
 
+class DescribeImageRequest(BaseModel):
+    filename: str = Field(default="image", max_length=200)
+    mime: str = Field(default="image/jpeg", max_length=100)
+    # Base64 of the raw image bytes (no data: prefix). ~8 MB of image = ~11 MB of base64.
+    data_b64: str = Field(max_length=12_000_000)
+    caption: str = Field(default="", max_length=2000)
+
+
+@router.post("/describe-image")
+def describe_console_image(body: DescribeImageRequest, user: dict = Depends(get_current_user_payload)):
+    """Vision pass for an image attached in the dashboard Console.
+
+    The agent model is text-only, so (like Telegram/Slack/WhatsApp) the image is
+    turned into a description + any legible text first, and the console puts that
+    text into the message it sends the agent.
+    """
+    import base64
+    import binascii
+
+    from app.services import attachment_extractor as ax
+
+    _require_paid_agents(user["user_id"])
+    if not (body.mime or "").lower().startswith("image/"):
+        raise HTTPException(status_code=400, detail="mime must be an image type")
+    try:
+        data = base64.b64decode(body.data_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="data_b64 is not valid base64")
+    if not data:
+        raise HTTPException(status_code=400, detail="image is empty")
+
+    description = ax.describe_image(data, body.mime, body.caption)
+    if not description:
+        raise HTTPException(status_code=502, detail="Image could not be analysed right now")
+    return {"description": description}
+
+
 class DiscussionTurnRequest(BaseModel):
     agent_type: str
     space_id: str
