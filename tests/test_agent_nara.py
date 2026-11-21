@@ -38,7 +38,8 @@ class NaraWiring(unittest.TestCase):
         self.assertIn("Enterprise", msg)
 
     def test_read_only_no_external_toolkits(self):
-        self.assertNotIn("deep_researcher", TOGGLEABLE_TOOLKITS)
+        # Present (the roster-vs-scope invariant) but empty: nothing to toggle.
+        self.assertEqual(TOGGLEABLE_TOOLKITS["deep_researcher"], [])
 
     def test_no_odoo_execute_methods(self):
         self.assertEqual(_odoo_methods_for("deep_researcher"), [])

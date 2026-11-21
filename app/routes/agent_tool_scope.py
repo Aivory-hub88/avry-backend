@@ -80,6 +80,10 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     # Matches [agent_type_mcp_bundles.marketing_content] (capped at 6 servers; Outlook
     # and Odoo-side reads are later additions). Must stay a subset of autonomous.
     "marketing_content": ["gmail", "googledrive", "googlesheets", "googledocs"],
+    # Nara (deep_researcher, 2026-11): read-only web research, no external toolkits to toggle.
+    # The empty list keeps the roster-vs-scope invariant (tests/test_agent_ivo.py) and, like a
+    # missing key, makes _check_agent_type answer 404 ("nothing to scope"). Subset of autonomous.
+    "deep_researcher": [],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
     "autonomous": [
