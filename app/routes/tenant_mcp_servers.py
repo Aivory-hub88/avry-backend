@@ -1308,9 +1308,9 @@ def internal_report_auth_failure(user_id: str, agent_type: str, body: AuthFailur
         conn.close()
     # Not one of the tenant's own servers: it may be the user-level n8n
     # connection, which Cerveau sees under a fixed name.
-    from app.routes.n8n_mcp_connection import N8N_SERVER_NAME, mark_auth_rejected
+    from app.routes.n8n_mcp_connection import N8N_SERVER_NAMES, mark_auth_rejected
 
-    if not flipped and body.name == N8N_SERVER_NAME:
+    if not flipped and body.name in N8N_SERVER_NAMES:
         flipped = mark_auth_rejected(user_id, body.status)
     if flipped:
         logger.warning(f"tenant MCP server {user_id}/{agent_type}/{body.name} flipped to verification_failed (HTTP {body.status} from Cerveau)")

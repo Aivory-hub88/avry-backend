@@ -312,32 +312,57 @@ class InternalServersForAgent(unittest.TestCase):
         self.dec.start()
         self.addCleanup(self.dec.stop)
 
-    def _row(self, status="verified", error=None, enabled=None):
-        return ("https://n8n.example.com/mcp-server/http", b"enc", status, "reversible", TOOLS_JSON,
+    def _row(self, status="verified", error=None, enabled=None, risk_tier="reversible"):
+        return ("https://n8n.example.com/mcp-server/http", b"enc", status, risk_tier, TOOLS_JSON,
                 list(n.PHASE1_TOOLS) if enabled is None else enabled, error)
 
     def test_no_grant_means_nothing_is_handed_out(self):
         with _patched(_FakeConn(fetchone_results=[None])):
             self.assertEqual(n.internal_servers_for_agent("u1", "leads_qualifier"), ([], []))
 
-    def test_granted_agent_gets_the_server_with_allowlist_as_disabled_tools(self):
+    def test_granted_agent_gets_a_read_server_and_an_action_server(self):
         conn = _FakeConn(fetchone_results=[self._row()])
         with _patched(conn):
             servers, unavailable = n.internal_servers_for_agent("u1", "leads_qualifier")
         self.assertEqual(unavailable, [])
-        self.assertEqual(len(servers), 1)
-        s = servers[0]
-        self.assertEqual(s["name"], "aivory-n8n")
-        self.assertEqual(s["transport"], "streamable-http")
-        self.assertEqual(s["auth_header_name"], "Authorization")
-        self.assertEqual(s["auth_header_value"], "Bearer tok-123")
-        self.assertEqual(s["risk_tier"], "reversible")
-        for tool in DANGEROUS:
-            self.assertIn(tool, s["disabled_tools"])
-        self.assertNotIn("execute_workflow", s["disabled_tools"])
+        by_name = {s["name"]: s for s in servers}
+        self.assertEqual(set(by_name), {"aivory-n8n-read", "aivory-n8n"})
+        for s in servers:
+            self.assertEqual(s["transport"], "streamable-http")
+            self.assertEqual(s["auth_header_name"], "Authorization")
+            self.assertEqual(s["auth_header_value"], "Bearer tok-123")
+            for tool in DANGEROUS:
+                self.assertIn(tool, s["disabled_tools"])
+        # Looking is free; acting parks for approval. Never 'reversible': on the
+        # web Console that tier is refused outright instead of asked about.
+        self.assertEqual(by_name["aivory-n8n-read"]["risk_tier"], "safe")
+        self.assertEqual(by_name["aivory-n8n"]["risk_tier"], "irreversible")
+        read_off, act_off = by_name["aivory-n8n-read"]["disabled_tools"], by_name["aivory-n8n"]["disabled_tools"]
+        self.assertIn("execute_workflow", read_off)
+        for tool in ("search_workflows", "get_workflow_details", "get_execution", "search_executions"):
+            self.assertNotIn(tool, read_off)
+            self.assertIn(tool, act_off)
+        self.assertNotIn("execute_workflow", act_off)
         sql, params = conn.executed[0]
         self.assertIn("JOIN product.user_n8n_mcp_connection_agents", sql)
         self.assertEqual(params, ("u1", "leads_qualifier"))
+
+    def test_stored_row_tier_does_not_leak_into_what_cerveau_is_told(self):
+        # Rows written before this change carry 'reversible'.
+        with _patched(_FakeConn(fetchone_results=[self._row(risk_tier="reversible")])):
+            servers, _ = n.internal_servers_for_agent("u1", "leads_qualifier")
+        self.assertEqual({s["name"]: s["risk_tier"] for s in servers}, {"aivory-n8n-read": "safe", "aivory-n8n": "irreversible"})
+
+    def test_a_server_with_nothing_enabled_is_left_out(self):
+        reads_only = ["search_workflows", "get_workflow_details", "get_execution", "search_executions"]
+        with _patched(_FakeConn(fetchone_results=[self._row(enabled=reads_only)])):
+            servers, _ = n.internal_servers_for_agent("u1", "leads_qualifier")
+        self.assertEqual([s["name"] for s in servers], ["aivory-n8n-read"])
+        with _patched(_FakeConn(fetchone_results=[self._row(enabled=["execute_workflow"])])):
+            servers, _ = n.internal_servers_for_agent("u1", "leads_qualifier")
+        self.assertEqual([s["name"] for s in servers], ["aivory-n8n"])
+        with _patched(_FakeConn(fetchone_results=[self._row(enabled=[])])):
+            self.assertEqual(n.internal_servers_for_agent("u1", "leads_qualifier"), ([], []))
 
     def test_unverified_connection_is_reported_unavailable_with_a_coarse_code(self):
         with _patched(_FakeConn(fetchone_results=[self._row(status="verification_failed", error="server returned HTTP 401")])):
@@ -387,6 +412,11 @@ class MarkAuthRejected(unittest.TestCase):
             self.assertFalse(n.mark_auth_rejected("u1", 403))
 
 
+class AuthFailureNames(unittest.TestCase):
+    def test_both_server_names_are_recognised_as_the_n8n_connection(self):
+        self.assertEqual(set(n.N8N_SERVER_NAMES), {"aivory-n8n", "aivory-n8n-read"})
+
+
 class TenantRouteIntegration(unittest.TestCase):
     """app/routes/tenant_mcp_servers.py's Cerveau-facing routes pick the n8n
     connection up."""
@@ -430,6 +460,15 @@ class TenantRouteIntegration(unittest.TestCase):
             result = t.internal_report_auth_failure("u1", "leads_qualifier", t.AuthFailureReport(name="aivory-n8n", status=401))
         self.assertEqual(result, {"flipped": True, "deduped": False})
         mark.assert_called_once_with("u1", 401)
+
+    def test_auth_failure_report_for_the_read_server_name_also_flips_it(self):
+        t._auth_failure_seen.clear()
+        conn = _FakeConn(fetchone_results=[None])
+        with patch.object(t, "_connect", return_value=conn), patch.object(t, "_ensure_schema"), \
+                patch.object(n, "mark_auth_rejected", return_value=True) as mark:
+            result = t.internal_report_auth_failure("u1", "leads_qualifier", t.AuthFailureReport(name="aivory-n8n-read", status=403))
+        self.assertEqual(result, {"flipped": True, "deduped": False})
+        mark.assert_called_once_with("u1", 403)
 
     def test_auth_failure_report_for_another_name_does_not_touch_the_n8n_connection(self):
         t._auth_failure_seen.clear()
