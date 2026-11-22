@@ -1210,6 +1210,17 @@ def internal_list_verified_servers(user_id: str, agent_type: str):
     # Registered but unusable: Cerveau tells the agent these are down (and
     # why) instead of the tools silently vanishing from its turn.
     unavailable = [{"name": name, "reason": _unavailable_reason_code(error)} for name, error in failed_rows]
+
+    # The user-level n8n connection (app/routes/n8n_mcp_connection.py) joins the
+    # agent's list when the user granted it to this agent. Imported here, not at
+    # module level: that module imports this one. A name clash with a server the
+    # tenant registered themselves keeps the tenant's own row.
+    from app.routes.n8n_mcp_connection import internal_servers_for_agent
+
+    n8n_servers, n8n_unavailable = internal_servers_for_agent(user_id, agent_type)
+    taken = {s["name"] for s in servers} | {u["name"] for u in unavailable}
+    servers.extend(s for s in n8n_servers if s["name"] not in taken)
+    unavailable.extend(u for u in n8n_unavailable if u["name"] not in taken)
     return {"servers": servers, "unavailable": unavailable}
 
 
@@ -1295,6 +1306,12 @@ def internal_report_auth_failure(user_id: str, agent_type: str, body: AuthFailur
         raise HTTPException(status_code=503, detail="Tenant MCP server store unavailable")
     finally:
         conn.close()
+    # Not one of the tenant's own servers: it may be the user-level n8n
+    # connection, which Cerveau sees under a fixed name.
+    from app.routes.n8n_mcp_connection import N8N_SERVER_NAME, mark_auth_rejected
+
+    if not flipped and body.name == N8N_SERVER_NAME:
+        flipped = mark_auth_rejected(user_id, body.status)
     if flipped:
         logger.warning(f"tenant MCP server {user_id}/{agent_type}/{body.name} flipped to verification_failed (HTTP {body.status} from Cerveau)")
     return {"flipped": flipped, "deduped": False}
