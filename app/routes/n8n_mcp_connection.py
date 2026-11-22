@@ -71,6 +71,23 @@ router = APIRouter(prefix="/api/v1/n8n-mcp-connection", tags=["n8n-mcp-connectio
 # with a name a tenant picked for a custom server (the merge skips on a clash
 # anyway).
 N8N_SERVER_NAME = "aivory-n8n"
+# The same connection is handed to Cerveau as TWO servers, because Cerveau
+# decides approval per server tier and a tier cannot be set per tool:
+#   - N8N_READ_SERVER_NAME ("safe"): the tools that only look. They run with
+#     no approval, so asking an agent to find a workflow is not a permission
+#     prompt.
+#   - N8N_SERVER_NAME ("irreversible"): the tools that act (execute_workflow).
+#     Cerveau parks the call as a pending approval, which the Console shows as
+#     an Approve/Deny card in the chat and the rail lists, and Telegram asks
+#     inline.
+# "reversible" is deliberately not used: on a channel that cannot ask (the
+# web Console) Cerveau does not park a reversible call, it refuses it.
+N8N_READ_SERVER_NAME = "aivory-n8n-read"
+N8N_SERVER_NAMES = (N8N_SERVER_NAME, N8N_READ_SERVER_NAME)
+READ_TOOLS = ("search_workflows", "get_workflow_details", "get_execution", "search_executions")
+ACTION_TOOLS = ("execute_workflow",)
+_READ_TIER = "safe"
+_ACTION_TIER = "irreversible"
 
 # n8n's instance-level MCP bearer token is an Authorization header.
 _AUTH_HEADER_NAME = "Authorization"
@@ -86,11 +103,9 @@ PHASE1_TOOLS = (
     "search_executions",
 )
 
-# Running a workflow executes the user's own automation on their instruction,
-# the same posture as the other custom servers ("the user's explicit
-# instruction IS the approval", tenant_mcp_servers.py). A row can be flipped to
-# 'irreversible' to park every call for approval if that is ever wanted.
-_DEFAULT_RISK_TIER = "reversible"
+# Stored per connection for the dashboard's benefit; what Cerveau is told is
+# decided per server by _READ_TIER / _ACTION_TIER above.
+_DEFAULT_RISK_TIER = "irreversible"
 
 # Verification calls the user's own URL from our backend. Even behind
 # guarded_fetch that is an outbound request on demand, so cap how often one
@@ -688,7 +703,7 @@ def internal_servers_for_agent(user_id: str, agent_type: str) -> tuple[list[dict
         conn.close()
     if row is None:
         return [], []
-    url, encrypted, status, risk_tier, tools_json, enabled_tools, last_error = row
+    url, encrypted, status, _stored_tier, tools_json, enabled_tools, last_error = row
     if status != "verified":
         # Same shape as a failed custom server: the agent is told it is down.
         code = "auth_rejected" if last_error and ("HTTP 401" in last_error or "HTTP 403" in last_error) else "verification_failed"
@@ -698,20 +713,36 @@ def internal_servers_for_agent(user_id: str, agent_type: str) -> tuple[list[dict
     except Exception as e:
         logger.error(f"n8n MCP internal decrypt failed for {user_id}: {e}")
         return [], []  # a connection whose token cannot be decrypted is not handed out
-    return (
-        [
+    return _split_servers(url, auth_value, tools_json or [], list(enabled_tools or [])), []
+
+
+def _split_servers(url: str, auth_value: str, tools_json: list, enabled_tools: list[str]) -> list[dict]:
+    """The connection as the two servers described at N8N_READ_SERVER_NAME. A
+    server with nothing enabled is left out, so the agent never sees an empty
+    one. Each lists every tool it must NOT expose as disabled, which includes
+    the other server's tools and anything outside the phase 1 allowlist."""
+    enabled = set(_effective_enabled(enabled_tools))
+    names = [t["name"] for t in tools_json if isinstance(t, dict) and t.get("name")]
+    servers = []
+    for server_name, tier, group in (
+        (N8N_READ_SERVER_NAME, _READ_TIER, READ_TOOLS),
+        (N8N_SERVER_NAME, _ACTION_TIER, ACTION_TOOLS),
+    ):
+        allowed = enabled & set(group)
+        if not allowed:
+            continue
+        servers.append(
             {
-                "name": N8N_SERVER_NAME,
+                "name": server_name,
                 "url": url,
                 "transport": "streamable-http",
                 "auth_header_name": _AUTH_HEADER_NAME,
                 "auth_header_value": auth_value,
-                "risk_tier": risk_tier,
-                "disabled_tools": _effective_disabled_tools(tools_json or [], list(enabled_tools or [])),
+                "risk_tier": tier,
+                "disabled_tools": [n for n in names if n not in allowed],
             }
-        ],
-        [],
-    )
+        )
+    return servers
 
 
 def mark_auth_rejected(user_id: str, status: int) -> bool:
