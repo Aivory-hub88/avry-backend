@@ -121,6 +121,13 @@ except Exception as e:
     active_agents_router = None
 
 try:
+    from app.routes.workspace_invites import router as workspace_invites_router
+    print("[✓] Workspace invite routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import workspace invite routes: {e}")
+    workspace_invites_router = None
+
+try:
     from app.routes.teams import router as teams_router
     print("[✓] Teams routes registered")
 except Exception as e:
@@ -281,6 +288,8 @@ if active_agents_router:
     app.include_router(active_agents_router)
 if teams_router:
     app.include_router(teams_router)
+if workspace_invites_router:
+    app.include_router(workspace_invites_router)
 if agent_tool_scope_router:
     app.include_router(agent_tool_scope_router)
 if credits_router:

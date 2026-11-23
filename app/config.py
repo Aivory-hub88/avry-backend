@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     password_reset_url_base: str = "https://aivory.uk/reset-password"
     admin_password_reset_url_base: str = "https://admin.aivory.id/admin/reset-password"
     password_reset_ttl_minutes: int = 60
+    notification_from_email: str = "noreply@aivory.uk"
+    workspace_url_base: str = "https://aivory.uk/workspace"
 
     # Account cleanup (see app/services/account_cleanup.py). Off by default —
     # the poller still runs and logs what it would warn/delete, but sends no

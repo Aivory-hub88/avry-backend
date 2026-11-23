@@ -26,7 +26,13 @@ def sender() -> Optional[str]:
     return settings.auth_from_email or settings.smtp_from_email
 
 
-async def send_email(to_address: str, subject: str, html: str, text: str) -> bool:
+async def send_email(
+    to_address: str,
+    subject: str,
+    html: str,
+    text: str,
+    from_address: Optional[str] = None,
+) -> bool:
     """
     Send one email. Returns False (never raises) if it could not be delivered.
     """
@@ -41,7 +47,7 @@ async def send_email(to_address: str, subject: str, html: str, text: str) -> boo
         from email.message import EmailMessage
 
         message = EmailMessage()
-        message["From"] = sender()
+        message["From"] = from_address or sender()
         message["To"] = to_address
         message["Subject"] = subject
         message.set_content(text)
