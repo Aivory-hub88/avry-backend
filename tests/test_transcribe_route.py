@@ -42,6 +42,18 @@ class TranscribeRouteTests(unittest.TestCase):
         self.assertEqual(m.call_args.kwargs["fallback_language"], "id")
         self.assertTrue(m.call_args.kwargs["prompt"])
 
+    def test_uses_accurate_model_and_folds_terms_into_prompt(self):
+        with patch.object(tr.ax, "transcribe_audio", return_value="ok") as m, \
+             patch.object(tr, "check_rate_limit", return_value=True):
+            r = _client().post(
+                "/api/v1/transcribe",
+                files={"file": ("voice.webm", b"abc", "audio/webm")},
+                data={"terms": "Lex, Geno,Aira"},
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(m.call_args.kwargs["model"], "whisper-large-v3")
+        self.assertIn("Lex, Geno, Aira", m.call_args.kwargs["prompt"])
+
     def test_requires_auth(self):
         r = _post(_client(authed=False))
         self.assertEqual(r.status_code, 401)
@@ -79,7 +91,7 @@ class LanguageGuardTests(unittest.TestCase):
 
         calls = []
 
-        def fake(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False):
+        def fake(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False, model=None):
             calls.append({"language": language, "verbose": verbose})
             return detected_then[len(calls) - 1]
 
@@ -116,6 +128,23 @@ class LanguageGuardTests(unittest.TestCase):
              patch.object(ax, "_stt_call", return_value=("hola", "")) as m:
             self.assertEqual(ax.transcribe_audio(b"x"), "hola")
         self.assertFalse(m.call_args.kwargs["verbose"])
+
+
+class BuildPromptTests(unittest.TestCase):
+    def test_no_terms_is_the_base_prompt(self):
+        self.assertEqual(tr.build_prompt(""), tr._PROMPT)
+
+    def test_dedupes_and_drops_junk(self):
+        p = tr.build_prompt("Lex, lex, <script>, " + "x" * 80 + ", ,Geno")
+        self.assertIn("Lex, Geno", p)
+        self.assertNotIn("script", p)
+        self.assertNotIn("xxxx", p)
+
+    def test_caps_term_count_and_length(self):
+        p = tr.build_prompt(",".join(f"Name{i}" for i in range(100)))
+        self.assertIn("Name19", p)
+        self.assertNotIn("Name20", p)
+        self.assertLessEqual(len(p), tr._MAX_PROMPT_CHARS)
 
 
 if __name__ == "__main__":
