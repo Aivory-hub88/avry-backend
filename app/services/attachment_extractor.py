@@ -216,7 +216,7 @@ def describe_image(data: bytes, mime: str, user_caption: str = "") -> Optional[s
 # VOICE NOTES (speech-to-text)
 # ============================================================================
 
-def _stt_call(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False):
+def _stt_call(api_key, data, filename, mime, *, language=None, prompt=None, verbose=False, model=None):
     """One Groq Whisper request. Returns (text, detected_language) or None on
     failure. detected_language is Whisper's lowercase English name (e.g.
     "indonesian") and is only available with verbose=True."""
@@ -226,7 +226,7 @@ def _stt_call(api_key, data, filename, mime, *, language=None, prompt=None, verb
             headers={"Authorization": f"Bearer {api_key}"},
             files={"file": (filename or "voice.ogg", data, mime or "audio/ogg")},
             data={
-                "model": STT_MODEL,
+                "model": model or STT_MODEL,
                 "response_format": "verbose_json" if verbose else "json",
                 **({"language": language} if language else {}),
                 **({"prompt": prompt} if prompt else {}),
@@ -251,6 +251,7 @@ def transcribe_audio(
     prompt: Optional[str] = None,
     fallback_language: Optional[str] = None,
     expected_languages: tuple = ("indonesian", "english", "malay"),
+    model: Optional[str] = None,
 ) -> Optional[str]:
     """Transcribe a voice note. Returns the transcript, a bracketed note for
     audio we refuse to send (too long/large), or None if it could not be done.
@@ -270,7 +271,8 @@ def transcribe_audio(
 
     guard = bool(fallback_language) and not language
     first = _stt_call(
-        api_key, data, filename, mime, language=language, prompt=prompt, verbose=guard
+        api_key, data, filename, mime, language=language, prompt=prompt, verbose=guard,
+        model=model,
     )
     if first is None:
         return None
@@ -279,7 +281,8 @@ def transcribe_audio(
     if guard and detected and detected not in expected_languages:
         logger.info(f"STT detected '{detected}'; retrying with '{fallback_language}'")
         retry = _stt_call(
-            api_key, data, filename, mime, language=fallback_language, prompt=prompt
+            api_key, data, filename, mime, language=fallback_language, prompt=prompt,
+            model=model,
         )
         if retry and retry[0]:
             text = retry[0]
