@@ -274,6 +274,13 @@ try:
 except Exception as e:
     print(f"[!] Teams routes failed: {e}")
 
+try:
+    from app.routes.workspace_invites import router as workspace_invites_router
+    app.include_router(workspace_invites_router)
+    print("[OK] Workspace invite routes registered")
+except Exception as e:
+    print(f"[!] Workspace invite routes failed: {e}")
+
 # The container runs THIS file (`python main.py`), not app/main.py, and only
 # app/main.py had ever registered this router — so every free-assessment lead
 # and funnel event POSTed by the landing site hit an unmounted path and came
