@@ -249,6 +249,13 @@ except Exception as e:
     print(f"[!] MCP image download routes failed: {e}")
 
 try:
+    from app.routes.byok_keys import router as byok_keys_router
+    app.include_router(byok_keys_router)
+    print("[OK] BYOK key routes registered")
+except Exception as e:
+    print(f"[!] BYOK key routes failed: {e}")
+
+try:
     from app.routes.transcribe import router as transcribe_router
     app.include_router(transcribe_router)
     print("[OK] Transcribe routes registered")
