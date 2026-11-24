@@ -339,6 +339,22 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens (expires_at);
 
+-- Passkeys (WebAuthn). One user can hold several; credential_id is the
+-- authenticator's own id (base64url), public_key the COSE key (base64url).
+CREATE TABLE IF NOT EXISTS passkey_credentials (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL UNIQUE,
+    public_key    TEXT NOT NULL,
+    sign_count    BIGINT NOT NULL DEFAULT 0,
+    transports    TEXT[],
+    name          TEXT NOT NULL DEFAULT 'Passkey',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at  TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user ON passkey_credentials (user_id);
+
 -- Forensic record of hard-deleted accounts. The live `users` row, its
 -- sessions and password hash are gone after a hard delete; this is the only
 -- remaining answer to "did we really delete this person, and when" if it's
@@ -440,6 +456,56 @@ async def update_user_account_type(user_id: str, account_type: str) -> bool:
         account_type, user_id,
     )
     return result == "UPDATE 1"
+
+
+# ---------------------------------------------------------------------------
+# Passkey credentials
+# ---------------------------------------------------------------------------
+
+async def insert_passkey(user_id: str, credential_id: str, public_key: str,
+                         sign_count: int, transports: Optional[list], name: str) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO passkey_credentials (user_id, credential_id, public_key, sign_count, transports, name) "
+        "VALUES ($1, $2, $3, $4, $5, $6)",
+        user_id, credential_id, public_key, sign_count, transports or [], name,
+    )
+
+
+async def list_passkeys(user_id: str) -> list:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, credential_id, transports, name, created_at, last_used_at "
+        "FROM passkey_credentials WHERE user_id = $1 ORDER BY created_at",
+        user_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_passkey(credential_id: str) -> Optional[dict]:
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, user_id, credential_id, public_key, sign_count "
+        "FROM passkey_credentials WHERE credential_id = $1",
+        credential_id,
+    )
+    return dict(row) if row else None
+
+
+async def touch_passkey(credential_id: str, sign_count: int) -> None:
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE passkey_credentials SET sign_count = $2, last_used_at = now() WHERE credential_id = $1",
+        credential_id, sign_count,
+    )
+
+
+async def delete_passkey(user_id: str, passkey_id: int) -> bool:
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM passkey_credentials WHERE id = $1 AND user_id = $2", passkey_id, user_id,
+    )
+    return result == "DELETE 1"
 
 
 # ---------------------------------------------------------------------------

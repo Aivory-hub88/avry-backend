@@ -93,6 +93,8 @@ app.add_middleware(
 try:
     from app.routes.auth import router as auth_router
     app.include_router(auth_router)
+    from app.routes.passkey import router as passkey_router
+    app.include_router(passkey_router)
     print("[OK] Auth routes registered")
 except Exception as e:
     print(f"[!] Auth routes failed: {e}")
