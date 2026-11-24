@@ -12,10 +12,14 @@ Dashboard-facing (JWT auth):
     PUT    /api/v1/byok-keys/{provider}         -> save/replace (validated live first)
     POST   /api/v1/byok-keys/{provider}/test    -> re-check the stored key
     DELETE /api/v1/byok-keys/{provider}         -> remove
+    PUT    /api/v1/byok-keys/settings           -> master switch + primary provider
 
 Service-facing (X-Internal-Token, same gate as agent_actions):
+    GET /api/v1/byok-keys/internal/{user_id}            -> {"provider", "api_key"} | 404
+        The key a turn should run on, with the user's switch and primary
+        provider applied. 404 means "use Aivory's key and charge credits".
     GET /api/v1/byok-keys/internal/{user_id}/{provider} -> {"api_key": "..."} | 404
-    Used by the bridge / LLM clients to resolve a user's key at call time.
+        One provider's key; 404 too while the user has BYOK switched off.
 """
 
 import logging
@@ -52,6 +56,12 @@ CREATE TABLE IF NOT EXISTS product.byok_keys (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, provider),
     CONSTRAINT byok_keys_status_check CHECK (status IN ('active','invalid'))
+);
+CREATE TABLE IF NOT EXISTS product.byok_settings (
+    user_id            TEXT PRIMARY KEY,
+    enabled            BOOLEAN NOT NULL DEFAULT TRUE,
+    preferred_provider TEXT,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -133,6 +143,19 @@ def _row_to_dict(provider, hint, status, last_verified_at, updated_at) -> dict:
     }
 
 
+def _load_settings(cur, user_id: str) -> dict:
+    """The user's switch and primary provider. No row means the defaults:
+    on, with no preferred provider — a saved key works without any setup."""
+    cur.execute(
+        "SELECT enabled, preferred_provider FROM product.byok_settings WHERE user_id = %s",
+        (user_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return {"enabled": True, "preferred_provider": None}
+    return {"enabled": bool(row[0]), "preferred_provider": row[1]}
+
+
 @router.get("")
 def list_keys(user: dict = Depends(get_current_user_payload)):
     conn = _connect()
@@ -145,9 +168,65 @@ def list_keys(user: dict = Depends(get_current_user_payload)):
                 (user["user_id"],),
             )
             rows = cur.fetchall()
-        return {"keys": [_row_to_dict(*r) for r in rows]}
+            settings = _load_settings(cur, user["user_id"])
+        return {"keys": [_row_to_dict(*r) for r in rows], "settings": settings}
     except Exception as e:
         logger.error(f"byok list failed: {e}")
+        raise HTTPException(status_code=503, detail="Key store unavailable")
+    finally:
+        conn.close()
+
+
+class SettingsRequest(BaseModel):
+    enabled: Optional[bool] = None
+    # Explicit null clears the choice (back to automatic).
+    preferred_provider: Optional[str] = None
+
+
+# Declared before PUT /{provider}: otherwise "settings" would match as a provider.
+@router.put("/settings")
+def update_settings(body: SettingsRequest, user: dict = Depends(get_current_user_payload)):
+    dump = getattr(body, "model_dump", None) or body.dict  # pydantic v2 / v1
+    changes = dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    if changes.get("preferred_provider") is not None:
+        _check_provider(changes["preferred_provider"])
+
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            current = _load_settings(cur, user["user_id"])
+            merged = {**current, **changes}
+            if merged["enabled"] is None:
+                merged["enabled"] = current["enabled"]
+            preferred = merged["preferred_provider"]
+            if preferred is not None:
+                cur.execute(
+                    "SELECT 1 FROM product.byok_keys WHERE user_id = %s AND provider = %s",
+                    (user["user_id"], preferred),
+                )
+                if not cur.fetchone():
+                    raise HTTPException(status_code=400, detail=f"Save a {preferred} key first")
+            cur.execute(
+                """
+                INSERT INTO product.byok_settings (user_id, enabled, preferred_provider)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    preferred_provider = EXCLUDED.preferred_provider,
+                    updated_at = now()
+                """,
+                (user["user_id"], merged["enabled"], preferred),
+            )
+        conn.commit()
+        logger.info(f"BYOK settings updated for {user['user_id']}: {merged}")
+        return {"enabled": merged["enabled"], "preferred_provider": preferred}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"byok settings update failed: {e}")
         raise HTTPException(status_code=503, detail="Key store unavailable")
     finally:
         conn.close()
@@ -259,6 +338,14 @@ def delete_key(provider: str, user: dict = Depends(get_current_user_payload)):
         conn.commit()
         if not row:
             raise HTTPException(status_code=404, detail="No key saved for this provider")
+        # A removed key can't stay the primary provider.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE product.byok_settings SET preferred_provider = NULL, updated_at = now()"
+                " WHERE user_id = %s AND preferred_provider = %s",
+                (user["user_id"], provider),
+            )
+        conn.commit()
         return {"ok": True}
     except HTTPException:
         raise
@@ -269,17 +356,63 @@ def delete_key(provider: str, user: dict = Depends(get_current_user_payload)):
         conn.close()
 
 
+def _is_enabled(user_id: str) -> bool:
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            return _load_settings(cur, user_id)["enabled"]
+    finally:
+        conn.close()
+
+
 def get_user_byok_key(user_id: str, provider: str) -> Optional[str]:
     """In-process resolver for backend LLM clients. None when the user has no
-    active key (or the store is unreachable) — callers fall back to Aivory's
-    own key, and must then bill credits as usual."""
+    active key, has switched BYOK off, or the store is unreachable — callers
+    fall back to Aivory's own key, and must then bill credits as usual."""
     if provider not in PROVIDERS:
         return None
     try:
+        if not _is_enabled(user_id):
+            return None
         return _load_plaintext(user_id, provider)
     except Exception as e:
         logger.error(f"byok resolve failed for {user_id}/{provider}: {e}")
         return None
+
+
+def resolve_active_byok(user_id: str) -> Optional[tuple[str, str]]:
+    """(provider, api_key) a turn should run on: nothing if the user switched
+    BYOK off, otherwise their primary provider if it still has an active key,
+    else the first provider with one."""
+    try:
+        conn = _connect()
+        try:
+            _ensure_schema(conn)
+            with conn.cursor() as cur:
+                settings = _load_settings(cur, user_id)
+        finally:
+            conn.close()
+        if not settings["enabled"]:
+            return None
+        order = [p for p in [settings["preferred_provider"], *PROVIDERS] if p]
+        for provider in dict.fromkeys(order):
+            api_key = _load_plaintext(user_id, provider)
+            if api_key:
+                return provider, api_key
+        return None
+    except Exception as e:
+        logger.error(f"byok resolve failed for {user_id}: {e}")
+        return None
+
+
+# Declared before the two-segment route below so neither can shadow the other.
+@router.get("/internal/{user_id}", dependencies=[Depends(require_internal_token)])
+def resolve_active_internal(user_id: str):
+    active = resolve_active_byok(user_id)
+    if not active:
+        raise HTTPException(status_code=404, detail="No active key")
+    return {"provider": active[0], "api_key": active[1]}
 
 
 @router.get("/internal/{user_id}/{provider}", dependencies=[Depends(require_internal_token)])
