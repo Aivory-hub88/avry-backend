@@ -23,12 +23,15 @@ Service-facing (X-Internal-Token, same gate as agent_actions):
 """
 
 import logging
+import re
+from urllib.parse import urlsplit
 from typing import Optional
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.services.guarded_fetch import GuardedFetchError, guarded_fetch
 from app.routes.agent_actions import get_current_user_payload, require_internal_token
 from app.services.mcp_server_encryption import decrypt_auth_header_value, encrypt_auth_header_value
 
@@ -36,7 +39,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/byok-keys", tags=["byok"])
 
-PROVIDERS = ("openrouter", "anthropic", "openai")
+# `openai_compatible` is any OpenAI-style /chat/completions endpoint the user
+# points us at (Together, Groq, a vLLM gateway…). It is the only provider whose
+# URL is user-supplied, so it is the only one that goes through the SSRF guard.
+PROVIDERS = ("openrouter", "anthropic", "openai", "openai_compatible")
+COMPATIBLE = "openai_compatible"
 
 _KEY_PREFIXES = {
     "openrouter": "sk-or-",
@@ -57,6 +64,8 @@ CREATE TABLE IF NOT EXISTS product.byok_keys (
     PRIMARY KEY (user_id, provider),
     CONSTRAINT byok_keys_status_check CHECK (status IN ('active','invalid'))
 );
+ALTER TABLE product.byok_keys ADD COLUMN IF NOT EXISTS base_url TEXT;
+ALTER TABLE product.byok_keys ADD COLUMN IF NOT EXISTS model TEXT;
 CREATE TABLE IF NOT EXISTS product.byok_settings (
     user_id            TEXT PRIMARY KEY,
     enabled            BOOLEAN NOT NULL DEFAULT TRUE,
@@ -129,12 +138,63 @@ def verify_provider_key(provider: str, api_key: str) -> tuple[bool, Optional[str
     return False, f"The provider returned {r.status_code}"
 
 
+def normalize_base_url(raw: str) -> str:
+    """The OpenAI-compatible base URL, e.g. https://api.together.xyz/v1.
+    https only, no credentials/query/fragment in it. Whether the host is a safe
+    (public) one is decided where it is resolved, by the SSRF guard, not here."""
+    url = (raw or "").strip().rstrip("/")
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise HTTPException(status_code=400, detail="The base URL must start with https://")
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise HTTPException(status_code=400, detail="The base URL can't contain credentials, a query or a fragment")
+    if len(url) > 300:
+        raise HTTPException(status_code=400, detail="The base URL is too long")
+    return url
+
+
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
+
+
+def normalize_model(raw: Optional[str]) -> str:
+    model = (raw or "").strip()
+    if not _MODEL_RE.match(model):
+        raise HTTPException(status_code=400, detail="Enter the model name to use, e.g. meta-llama/Llama-3.3-70B-Instruct")
+    return model
+
+
+def verify_compatible(base_url: str, api_key: str) -> tuple[bool, Optional[str], Optional[str]]:
+    """(ok, reason, note) for an OpenAI-compatible endpoint, via the SSRF guard:
+    it refuses loopback / private / metadata addresses and never follows a
+    redirect into one. A server with no /models endpoint can't be verified, so
+    that is accepted with a note instead of being refused."""
+    try:
+        r = guarded_fetch(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        )
+    except GuardedFetchError as e:
+        return False, str(e), None
+    if r.status == 200:
+        return True, None, None
+    if r.status in (401, 403):
+        return False, "The server rejected this key", None
+    if r.status in (404, 405, 501):
+        return True, None, "Saved, but this server has no /models endpoint, so the key could not be verified."
+    return False, f"The server returned {r.status}", None
+
+
 class SaveKeyRequest(BaseModel):
-    api_key: str = Field(min_length=20, max_length=512)
+    api_key: str = Field(min_length=8, max_length=512)
+    # Only for openai_compatible.
+    base_url: Optional[str] = Field(default=None, max_length=400)
+    model: Optional[str] = Field(default=None, max_length=200)
 
 
-def _row_to_dict(provider, hint, status, last_verified_at, updated_at) -> dict:
+def _row_to_dict(provider, hint, status, last_verified_at, updated_at, base_url=None, model=None) -> dict:
     return {
+        "base_url": base_url,
+        "model": model,
         "provider": provider,
         "key_hint": hint,
         "status": status,
@@ -163,7 +223,7 @@ def list_keys(user: dict = Depends(get_current_user_payload)):
         _ensure_schema(conn)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT provider, key_hint, status, last_verified_at, updated_at"
+                "SELECT provider, key_hint, status, last_verified_at, updated_at, base_url, model"
                 " FROM product.byok_keys WHERE user_id = %s ORDER BY provider",
                 (user["user_id"],),
             )
@@ -236,12 +296,20 @@ def update_settings(body: SettingsRequest, user: dict = Depends(get_current_user
 def save_key(provider: str, body: SaveKeyRequest, user: dict = Depends(get_current_user_payload)):
     _check_provider(provider)
     api_key = body.api_key.strip()
-    if not api_key.startswith(_KEY_PREFIXES[provider]):
-        raise HTTPException(
-            status_code=400,
-            detail=f"That doesn't look like a {provider} key (expected it to start with '{_KEY_PREFIXES[provider]}')",
-        )
-    ok, reason = verify_provider_key(provider, api_key)
+    base_url = model = note = None
+    if provider == COMPATIBLE:
+        base_url = normalize_base_url(body.base_url or "")
+        model = normalize_model(body.model)
+        ok, reason, note = verify_compatible(base_url, api_key)
+    else:
+        if len(api_key) < 20:
+            raise HTTPException(status_code=400, detail="That key looks too short")
+        if not api_key.startswith(_KEY_PREFIXES[provider]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"That doesn't look like a {provider} key (expected it to start with '{_KEY_PREFIXES[provider]}')",
+            )
+        ok, reason = verify_provider_key(provider, api_key)
     if not ok:
         raise HTTPException(status_code=400, detail=reason or "Key verification failed")
 
@@ -252,22 +320,27 @@ def save_key(provider: str, body: SaveKeyRequest, user: dict = Depends(get_curre
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO product.byok_keys (user_id, provider, api_key_encrypted, key_hint, status, last_verified_at)
-                VALUES (%s, %s, %s, %s, 'active', now())
+                INSERT INTO product.byok_keys (user_id, provider, api_key_encrypted, key_hint, status, last_verified_at, base_url, model)
+                VALUES (%s, %s, %s, %s, 'active', now(), %s, %s)
                 ON CONFLICT (user_id, provider) DO UPDATE SET
                     api_key_encrypted = EXCLUDED.api_key_encrypted,
                     key_hint = EXCLUDED.key_hint,
                     status = 'active',
                     last_verified_at = now(),
+                    base_url = EXCLUDED.base_url,
+                    model = EXCLUDED.model,
                     updated_at = now()
-                RETURNING provider, key_hint, status, last_verified_at, updated_at
+                RETURNING provider, key_hint, status, last_verified_at, updated_at, base_url, model
                 """,
-                (user["user_id"], provider, encrypted, _hint(api_key)),
+                (user["user_id"], provider, encrypted, _hint(api_key), base_url, model),
             )
             row = cur.fetchone()
         conn.commit()
         logger.info(f"BYOK key saved: {provider} for {user['user_id']}")
-        return _row_to_dict(*row)
+        result = _row_to_dict(*row)
+        if note:
+            result["note"] = note
+        return result
     except ValueError as e:
         logger.error(f"byok encryption unavailable: {e}")
         raise HTTPException(status_code=503, detail="Key store unavailable")
@@ -296,6 +369,22 @@ def _load_plaintext(user_id: str, provider: str) -> Optional[str]:
         conn.close()
 
 
+def _load_endpoint(user_id: str, provider: str) -> tuple[Optional[str], Optional[str]]:
+    """(base_url, model) of a saved key; both None for the fixed providers."""
+    conn = _connect()
+    try:
+        _ensure_schema(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT base_url, model FROM product.byok_keys WHERE user_id = %s AND provider = %s",
+                (user_id, provider),
+            )
+            row = cur.fetchone()
+        return (row[0], row[1]) if row else (None, None)
+    finally:
+        conn.close()
+
+
 @router.post("/{provider}/test")
 def test_key(provider: str, user: dict = Depends(get_current_user_payload)):
     _check_provider(provider)
@@ -307,7 +396,13 @@ def test_key(provider: str, user: dict = Depends(get_current_user_payload)):
     if not api_key:
         raise HTTPException(status_code=404, detail="No key saved for this provider")
 
-    ok, reason = verify_provider_key(provider, api_key)
+    if provider == COMPATIBLE:
+        base_url, _model = _load_endpoint(user["user_id"], provider)
+        if not base_url:
+            raise HTTPException(status_code=404, detail="No endpoint saved for this key")
+        ok, reason, _note = verify_compatible(base_url, api_key)
+    else:
+        ok, reason = verify_provider_key(provider, api_key)
     conn = _connect()
     try:
         with conn.cursor() as cur:
@@ -412,7 +507,13 @@ def resolve_active_internal(user_id: str):
     active = resolve_active_byok(user_id)
     if not active:
         raise HTTPException(status_code=404, detail="No active key")
-    return {"provider": active[0], "api_key": active[1]}
+    result = {"provider": active[0], "api_key": active[1]}
+    if active[0] == COMPATIBLE:
+        base_url, model = _load_endpoint(user_id, active[0])
+        if not base_url or not model:
+            raise HTTPException(status_code=404, detail="No active key")
+        result.update({"base_url": base_url, "model": model})
+    return result
 
 
 @router.get("/internal/{user_id}/{provider}", dependencies=[Depends(require_internal_token)])

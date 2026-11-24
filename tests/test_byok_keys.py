@@ -34,6 +34,12 @@ class _Cur:
             self._row = db.settings
         elif "SELECT 1 FROM product.byok_keys" in sql:
             self._row = (1,) if params[1] in db.keys else None
+        elif "INSERT INTO product.byok_keys" in sql:
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            uid, provider, _enc, hint, base_url, model = params
+            db.saved = (provider, hint, "active", now, now, base_url, model)
+            self._row = db.saved
         elif "INSERT INTO product.byok_settings" in sql:
             db.settings = (params[1], params[2])
             self._row = None
@@ -60,7 +66,7 @@ class _Conn:
 
 class _Db:
     def __init__(self, keys=(), settings=None):
-        self.keys, self.settings = set(keys), settings
+        self.keys, self.settings, self.saved = set(keys), settings, None
 
 
 class ByokSettingsTest(unittest.TestCase):
@@ -115,6 +121,99 @@ class ByokSettingsTest(unittest.TestCase):
         with self._patched(db), mock.patch.object(byok_keys, "_load_plaintext", lambda u, p: "sk-or-secret"):
             self.assertIsNone(byok_keys.get_user_byok_key("u1", "openrouter"))
             self.assertIsNone(byok_keys.resolve_active_byok("u1"))
+
+
+class OpenAiCompatibleTest(unittest.TestCase):
+    URL = "https://api.together.xyz/v1"
+    KEY = "tg-" + "k" * 24
+
+    def _put(self, **body):
+        payload = {"api_key": self.KEY, "base_url": self.URL, "model": "meta-llama/Llama-3.3-70B-Instruct"}
+        payload.update(body)
+        return _client().put("/api/v1/byok-keys/openai_compatible", json=payload)
+
+    def test_url_normalisation(self):
+        n = byok_keys.normalize_base_url
+        self.assertEqual(n(" https://api.together.xyz/v1/ "), "https://api.together.xyz/v1")
+        from fastapi import HTTPException
+        for bad in ["http://api.example.com/v1", "ftp://x.com", "api.example.com/v1", "",
+                    "https://user:pw@api.example.com/v1", "https://api.example.com/v1?x=1",
+                    "https://api.example.com/v1#frag", "https://" + "a" * 400 + ".com"]:
+            with self.assertRaises(HTTPException, msg=bad):
+                n(bad)
+
+    def test_model_name_validation(self):
+        from fastapi import HTTPException
+        self.assertEqual(byok_keys.normalize_model("gpt-4o-mini"), "gpt-4o-mini")
+        self.assertEqual(byok_keys.normalize_model("meta-llama/Llama-3.3-70B-Instruct"), "meta-llama/Llama-3.3-70B-Instruct")
+        for bad in [None, "", "  ", "has space", "-leading", "a;b", "x" * 201]:
+            with self.assertRaises(HTTPException, msg=repr(bad)):
+                byok_keys.normalize_model(bad)
+
+    def test_url_and_model_are_required(self):
+        with mock.patch.object(byok_keys, "_connect") as connect:
+            self.assertEqual(self._put(base_url=None).status_code, 400)
+            self.assertEqual(self._put(model=None).status_code, 400)
+        connect.assert_not_called()
+
+    def test_internal_and_private_addresses_are_refused_and_nothing_is_stored(self):
+        # The real SSRF guard, no network needed: these are denied before connecting.
+        for url in ["https://127.0.0.1/v1", "https://localhost/v1", "https://169.254.169.254/v1",
+                    "https://10.0.0.5/v1", "https://192.168.1.1/v1", "https://[::1]/v1"]:
+            with mock.patch.object(byok_keys, "_connect") as connect:
+                r = self._put(base_url=url)
+            self.assertEqual(r.status_code, 400, url)
+            connect.assert_not_called()
+
+    def test_verify_status_mapping(self):
+        def fake(status):
+            return mock.patch.object(byok_keys, "guarded_fetch", return_value=mock.Mock(status=status))
+        with fake(200):
+            self.assertEqual(byok_keys.verify_compatible(self.URL, self.KEY), (True, None, None))
+        for status in (401, 403):
+            with fake(status):
+                ok, reason, note = byok_keys.verify_compatible(self.URL, self.KEY)
+                self.assertFalse(ok)
+        with fake(404):
+            ok, reason, note = byok_keys.verify_compatible(self.URL, self.KEY)
+            self.assertTrue(ok)
+            self.assertIn("could not be verified", note)
+        with fake(500):
+            self.assertFalse(byok_keys.verify_compatible(self.URL, self.KEY)[0])
+        from app.services.guarded_fetch import GuardedFetchError
+        with mock.patch.object(byok_keys, "guarded_fetch", side_effect=GuardedFetchError("denied")):
+            self.assertEqual(byok_keys.verify_compatible(self.URL, self.KEY), (False, "denied", None))
+
+    def test_save_stores_endpoint_and_returns_it_without_the_key(self):
+        db = _Db()
+        with mock.patch.multiple(byok_keys, _connect=lambda: _Conn(db), _ensure_schema=lambda c: None,
+                                 encrypt_auth_header_value=lambda k: b"enc"), \
+             mock.patch.object(byok_keys, "verify_compatible", return_value=(True, None, None)):
+            r = self._put(base_url=self.URL + "/")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["base_url"], self.URL)
+        self.assertEqual(body["model"], "meta-llama/Llama-3.3-70B-Instruct")
+        self.assertEqual(body["key_hint"], "…" + self.KEY[-4:])
+        self.assertNotIn(self.KEY, r.text)
+
+    def test_unverifiable_server_is_saved_with_a_note(self):
+        db = _Db()
+        with mock.patch.multiple(byok_keys, _connect=lambda: _Conn(db), _ensure_schema=lambda c: None,
+                                 encrypt_auth_header_value=lambda k: b"enc"), \
+             mock.patch.object(byok_keys, "verify_compatible", return_value=(True, None, "no /models")):
+            r = self._put()
+        self.assertEqual(r.json()["note"], "no /models")
+
+    def test_standard_providers_still_need_a_full_length_key(self):
+        r = _client().put("/api/v1/byok-keys/openai", json={"api_key": "sk-short1"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_compatible_can_be_a_primary_provider(self):
+        db = _Db(keys={"openai_compatible"})
+        with mock.patch.multiple(byok_keys, _connect=lambda: _Conn(db), _ensure_schema=lambda c: None):
+            r = _client().put("/api/v1/byok-keys/settings", json={"preferred_provider": "openai_compatible"})
+        self.assertEqual(r.json()["preferred_provider"], "openai_compatible")
 
 
 class ByokKeysTest(unittest.TestCase):
