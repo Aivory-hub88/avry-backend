@@ -11,6 +11,7 @@ never accepted as an access or refresh token (see token_kinds).
 """
 import json
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -61,6 +62,7 @@ def _sign_challenge(challenge: bytes, purpose: str, user_id: Optional[str] = Non
     return jwt.encode(
         {
             "type": CHALLENGE_TYPE,
+            "jti": uuid.uuid4().hex,
             "purpose": purpose,
             "challenge": bytes_to_base64url(challenge),
             "user_id": user_id,
@@ -72,7 +74,8 @@ def _sign_challenge(challenge: bytes, purpose: str, user_id: Optional[str] = Non
     )
 
 
-def _open_challenge(token: str, purpose: str, user_id: Optional[str] = None) -> bytes:
+async def _open_challenge(token: str, purpose: str, user_id: Optional[str] = None) -> bytes:
+    """Validate a challenge token and spend it: it opens exactly once."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError:
@@ -81,6 +84,10 @@ def _open_challenge(token: str, purpose: str, user_id: Optional[str] = None) -> 
         raise PasskeyError("Invalid passkey request")
     if user_id is not None and payload.get("user_id") != user_id:
         raise PasskeyError("Invalid passkey request")
+    jti = payload.get("jti")
+    expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+    if not jti or not await pg.redeem_passkey_challenge(jti, expires_at):
+        raise PasskeyError("Passkey request already used, try again")
     return base64url_to_bytes(payload["challenge"])
 
 
@@ -112,7 +119,7 @@ async def registration_options(user: dict) -> dict:
 
 async def verify_registration(user: dict, challenge_token: str, credential: dict, name: str) -> None:
     user_id = user.get("user_id") or user.get("id")
-    challenge = _open_challenge(challenge_token, "register", user_id)
+    challenge = await _open_challenge(challenge_token, "register", user_id)
     try:
         verified = verify_registration_response(
             credential=credential,
@@ -150,7 +157,7 @@ def login_options() -> dict:
 
 async def verify_login(challenge_token: str, credential: dict) -> dict:
     """Return the user row that owns the asserted passkey."""
-    challenge = _open_challenge(challenge_token, "login")
+    challenge = await _open_challenge(challenge_token, "login")
     stored = await pg.get_passkey(credential.get("id") or "")
     if not stored:
         raise PasskeyError("Passkey not recognised")

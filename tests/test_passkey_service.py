@@ -71,6 +71,7 @@ class FakePg:
     def __init__(self, user):
         self.user = user
         self.rows = {}
+        self.used = set()
 
     async def list_passkeys(self, user_id):
         return [r for r in self.rows.values() if r["user_id"] == user_id]
@@ -81,6 +82,12 @@ class FakePg:
 
     async def get_passkey(self, credential_id):
         return self.rows.get(credential_id)
+
+    async def redeem_passkey_challenge(self, jti, expires_at):
+        if jti in self.used:
+            return False
+        self.used.add(jti)
+        return True
 
     async def touch_passkey(self, credential_id, sign_count):
         self.rows[credential_id]["sign_count"] = sign_count
@@ -134,10 +141,27 @@ class PasskeyServiceTest(unittest.TestCase):
     def test_challenge_cannot_cross_purposes_or_users(self):
         opts = ps.login_options()
         with self.assertRaises(ps.PasskeyError):
-            ps._open_challenge(opts["challenge_token"], "register", "user_1")
+            _run(ps._open_challenge(opts["challenge_token"], "register", "user_1"))
         reg = _run(ps.registration_options(USER))
         with self.assertRaises(ps.PasskeyError):
-            ps._open_challenge(reg["challenge_token"], "register", "someone_else")
+            _run(ps._open_challenge(reg["challenge_token"], "register", "someone_else"))
+
+    def test_a_challenge_works_once(self):
+        self._register()
+        opts = ps.login_options()
+        assertion = self.auth.assert_(opts["options"])
+        _run(ps.verify_login(opts["challenge_token"], assertion))
+        # Same token and same signed assertion, sent again (a captured request).
+        with self.assertRaisesRegex(ps.PasskeyError, "already used"):
+            _run(ps.verify_login(opts["challenge_token"], assertion))
+
+    def test_a_registration_challenge_works_once(self):
+        opts = _run(ps.registration_options(USER))
+        cred = self.auth.register(opts["options"])
+        _run(ps.verify_registration(USER, opts["challenge_token"], cred, "Laptop"))
+        with self.assertRaisesRegex(ps.PasskeyError, "already used"):
+            _run(ps.verify_registration(USER, opts["challenge_token"], cred, "Laptop"))
+        self.assertEqual(len(self.pg.rows), 1)
 
     def test_unknown_credential_is_rejected(self):
         opts = ps.login_options()

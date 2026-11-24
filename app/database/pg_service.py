@@ -355,6 +355,15 @@ CREATE TABLE IF NOT EXISTS passkey_credentials (
 
 CREATE INDEX IF NOT EXISTS idx_passkey_credentials_user ON passkey_credentials (user_id);
 
+-- Passkey challenges already redeemed (jti), so each one works once even with
+-- several backend instances. Rows are pruned as they expire.
+CREATE TABLE IF NOT EXISTS passkey_used_challenges (
+    jti        TEXT PRIMARY KEY,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_passkey_used_challenges_expires ON passkey_used_challenges (expires_at);
+
 -- Forensic record of hard-deleted accounts. The live `users` row, its
 -- sessions and password hash are gone after a hard delete; this is the only
 -- remaining answer to "did we really delete this person, and when" if it's
@@ -498,6 +507,17 @@ async def touch_passkey(credential_id: str, sign_count: int) -> None:
         "UPDATE passkey_credentials SET sign_count = $2, last_used_at = now() WHERE credential_id = $1",
         credential_id, sign_count,
     )
+
+
+async def redeem_passkey_challenge(jti: str, expires_at) -> bool:
+    """Record a challenge as used. True the first time, False on any replay."""
+    pool = await get_pool()
+    await pool.execute("DELETE FROM passkey_used_challenges WHERE expires_at < now()")
+    result = await pool.execute(
+        "INSERT INTO passkey_used_challenges (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO NOTHING",
+        jti, expires_at,
+    )
+    return result == "INSERT 0 1"
 
 
 async def delete_passkey(user_id: str, passkey_id: int) -> bool:
