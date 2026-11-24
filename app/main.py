@@ -163,6 +163,13 @@ except Exception as e:
     mcp_image_downloads_router = None
 
 try:
+    from app.routes.byok_keys import router as byok_keys_router
+    print("[✓] BYOK key routes registered")
+except Exception as e:
+    print(f"[!] Warning: Could not import BYOK key routes: {e}")
+    byok_keys_router = None
+
+try:
     from app.routes.transcribe import router as transcribe_router
     print("[✓] Transcribe routes registered")
 except Exception as e:
@@ -300,6 +307,8 @@ if assessment_leads_router:
     app.include_router(assessment_leads_router)
 if mcp_image_downloads_router:
     app.include_router(mcp_image_downloads_router)
+if byok_keys_router:
+    app.include_router(byok_keys_router)
 if transcribe_router:
     app.include_router(transcribe_router)
 
