@@ -343,6 +343,14 @@ class AuthService:
         if not self.verify_password(credentials.password, user["password_hash"]):
             raise ValueError("Invalid email or password")
 
+        return await self.complete_login(user, pg_up)
+
+    async def complete_login(self, user: dict, pg_up: bool) -> AuthResponse:
+        """Everything after the credential check: payment gate, session, tokens.
+
+        Shared by password login and passkey login, so a passkey can never
+        skip the Policy A gate.
+        """
         # ── Policy A gate: block login while the account is inside its 32h
         # no-purchase window (see app/services/account_cleanup.py). Only
         # meaningful when Postgres is up — the JSON fallback store has no
