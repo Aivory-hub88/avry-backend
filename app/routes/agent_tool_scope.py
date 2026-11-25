@@ -60,15 +60,15 @@ router = APIRouter(prefix="/api/v1/agent-profiles", tags=["agent-tool-scope"])
 # MCP server provisioning before the gate has anything to grant.
 TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "customer_service": ["zendesk", "hubspot", "slack"],
-    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify", "googledrive", "googlesheets", "linkedin"],
+    "leads_qualifier": ["hubspot", "slack", "gmail", "outlook", "smartlead", "prospeo", "millionverifier", "emaillistverify", "googledrive", "googlesheets", "googledocs", "linkedin"],
     "office_assistant": ["slack", "asana", "erpnext", "gmail", "outlook", "googlecalendar", "trello", "linear", "googledrive", "googlesheets", "googledocs", "linkedin"],
-    "finance_invoice_ops": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets"],
+    "finance_invoice_ops": ["erpnext", "gmail", "outlook", "googledrive", "googlesheets", "googledocs"],
     # Ivo (data_analyst, 2026-11): read-only on business systems, plus Google
     # Sheets/Docs/Drive for his own report files. No mail, no ERP writes
     # (docs/CERVEAU-NEW-AGENTS-PLAN.md section 3.1). Matches the MCP bundles in
     # [agent_type_mcp_bundles.data_analyst] (capped at 6 servers); Zendesk, SAP and
     # Google Docs are later additions. Must stay a subset of the autonomous union.
-    "data_analyst": ["hubspot", "erpnext", "googledrive", "googlesheets"],
+    "data_analyst": ["hubspot", "erpnext", "googledrive", "googlesheets", "googledocs"],
     # Juno (operations_inventory, 2026-11): stock and purchasing. ERPNext for
     # stock/PO, mail for supplier drafts (send is approval-gated), Sheets/Drive for
     # her stock files. Odoo is a separate Od-MCP connection, not a toolkit here.
@@ -86,6 +86,11 @@ TOGGLEABLE_TOOLKITS: Dict[str, list] = {
     "deep_researcher": [],
     # autonomous = union of every toolkit (matches [agent_type_mcp_bundles
     # .autonomous] in Cerveau's config, which grants the union).
+    # Aira (chief_of_staff, 2026-11): delegates and reports, so she needs the
+    # everyday office toolkits (mail, calendar, Drive/Docs/Sheets). Matches
+    # [agent_type_mcp_bundles.chief_of_staff]; Slack/Asana deferred (server cap).
+    # Must stay a subset of autonomous.
+    "chief_of_staff": ["gmail", "googlecalendar", "googledrive", "googledocs", "googlesheets"],
     "autonomous": [
         "zendesk", "hubspot", "slack", "asana", "erpnext",
         "gmail", "outlook", "googlecalendar", "trello", "linear",

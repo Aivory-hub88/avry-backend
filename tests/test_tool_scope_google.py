@@ -20,12 +20,13 @@ class GoogleWorkspaceScopeTest(unittest.TestCase):
     def test_assignment(self):
         self.assertEqual(self.google("autonomous"), GOOGLE)
         self.assertEqual(self.google("office_assistant"), GOOGLE)
-        self.assertEqual(self.google("finance_invoice_ops"), {"googledrive", "googlesheets"})
-        self.assertEqual(self.google("leads_qualifier"), {"googledrive", "googlesheets"})
+        self.assertEqual(self.google("finance_invoice_ops"), GOOGLE)
+        self.assertEqual(self.google("leads_qualifier"), GOOGLE)
+        self.assertEqual(self.google("data_analyst"), GOOGLE)
+        self.assertEqual(self.google("chief_of_staff"), GOOGLE)
 
-    def test_support_and_coordinator_get_none(self):
+    def test_support_gets_none(self):
         self.assertEqual(self.google("customer_service"), set())
-        self.assertEqual(self.google("chief_of_staff"), set())
 
     def test_no_duplicates(self):
         for agent, slugs in T.items():
